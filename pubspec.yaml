@@ -1,0 +1,47 @@
+name: gif_coder
+description: A custom UI for LM Studio with agentic file output.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.1.0
+  path_provider: ^2.1.1
+  path: ^1.8.3
+  file_picker: ^11.0.2
+  shared_preferences: ^2.5.5
+  window_manager: ^0.5.1
+  flutter_secure_storage: ^10.2.0
+
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+  inno_bundle: ^0.11.2
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/gifs/
+
+flutter_launcher_icons:
+  image_path: "assets/Icon/icon.png"
+  windows:
+    generate: true
+    icon_path: "assets/Icon/icon.ico"
+  macos:
+    generate: true
+    image_path: "assets/Icon/icon.png"
+  linux:
+    generate: true
+    image_path: "assets/Icon/icon.png"
+
+inno_bundle:
+  id: 666c3210-5264-11f1-9111-8be523798ee2
+  publisher: MrCre
