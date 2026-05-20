@@ -67,7 +67,6 @@ class _ChatPageState extends State<ChatPage> {
   final ScrollController _scrollController = ScrollController();
   final List<Map<String, dynamic>> _messages = [];
   String? _gifPath;
-  int? _gifCacheWidth;
   ValueNotifier<String>? _currentReplyNotifier;
   bool _stopRequested = false;
 
@@ -294,30 +293,20 @@ class _ChatPageState extends State<ChatPage> {
     final topPadding = MediaQuery.paddingOf(context).top + _topSettingsReserve;
     final bottomPadding =
         MediaQuery.paddingOf(context).bottom + _bottomPromptReserve;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    final cacheWidth = (MediaQuery.sizeOf(context).width * dpr).round();
     Widget image;
     if (filePath != null) {
-      if (_gifCacheWidth != cacheWidth) {
-        _gifCacheWidth = cacheWidth;
-      }
       image = Image.file(
         File(filePath),
         fit: BoxFit.cover,
         gaplessPlayback: true,
         filterQuality: FilterQuality.low,
-        cacheWidth: _gifCacheWidth,
       );
     } else {
-      if (_gifCacheWidth != cacheWidth) {
-        _gifCacheWidth = cacheWidth;
-      }
       image = Image.asset(
         'assets/gifs/${_state.defaultFileName}',
         fit: BoxFit.cover,
         gaplessPlayback: true,
         filterQuality: FilterQuality.low,
-        cacheWidth: _gifCacheWidth,
       );
     }
     return Padding(
