@@ -17,10 +17,29 @@ extension AppStateInfo on AppState {
   String get defaultFileName => '$name.gif';
 }
 
+enum AiProvider { lmStudio, gemini, openRouter }
+
+extension AiProviderExtension on AiProvider {
+  String get label => switch (this) {
+        AiProvider.lmStudio => 'LM Studio / Custom',
+        AiProvider.gemini => 'Gemini',
+        AiProvider.openRouter => 'OpenRouter',
+      };
+}
+
 class SettingsStore {
-  String serverUrl = 'http://localhost:1234';
-  String apiKey = '';
-  String modelName = 'local-model';
+  AiProvider provider = AiProvider.lmStudio;
+
+  String lmStudioUrl = 'http://localhost:1234';
+  String lmStudioApiKey = '';
+  String lmStudioModel = 'local-model';
+
+  String geminiApiKey = '';
+  String geminiModel = 'gemma-4-31b-it';
+
+  String openRouterApiKey = '';
+  String openRouterModel = 'openrouter/owl-alpha';
+
   String? gifFolderPath;
   final Map<AppState, String> gifFiles = {
     for (final s in AppState.values) s: s.defaultFileName,
@@ -29,11 +48,112 @@ class SettingsStore {
   bool isLoaded = false;
   final _secureStorage = const FlutterSecureStorage();
 
+  String get serverUrl {
+    return switch (provider) {
+      AiProvider.lmStudio => lmStudioUrl,
+      AiProvider.gemini =>
+        'https://generativelanguage.googleapis.com/v1beta/openai/',
+      AiProvider.openRouter => 'https://openrouter.ai/api/v1',
+    };
+  }
+
+  set serverUrl(String val) {
+    if (provider == AiProvider.lmStudio) {
+      lmStudioUrl = val;
+    }
+  }
+
+  String get apiKey {
+    return switch (provider) {
+      AiProvider.lmStudio => lmStudioApiKey,
+      AiProvider.gemini => geminiApiKey,
+      AiProvider.openRouter => openRouterApiKey,
+    };
+  }
+
+  set apiKey(String val) {
+    switch (provider) {
+      case AiProvider.lmStudio:
+        lmStudioApiKey = val;
+        break;
+      case AiProvider.gemini:
+        geminiApiKey = val;
+        break;
+      case AiProvider.openRouter:
+        openRouterApiKey = val;
+        break;
+    }
+  }
+
+  String get modelName {
+    return switch (provider) {
+      AiProvider.lmStudio => lmStudioModel,
+      AiProvider.gemini => geminiModel,
+      AiProvider.openRouter => openRouterModel,
+    };
+  }
+
+  set modelName(String val) {
+    switch (provider) {
+      case AiProvider.lmStudio:
+        lmStudioModel = val;
+        break;
+      case AiProvider.gemini:
+        geminiModel = val;
+        break;
+      case AiProvider.openRouter:
+        openRouterModel = val;
+        break;
+    }
+  }
+
+  String get chatCompletionsUrl {
+    return switch (provider) {
+      AiProvider.lmStudio =>
+        '${serverUrl.replaceAll(RegExp(r'/+$'), '')}/v1/chat/completions',
+      AiProvider.gemini =>
+        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      AiProvider.openRouter => 'https://openrouter.ai/api/v1/chat/completions',
+    };
+  }
+
+  String get modelsUrl {
+    return switch (provider) {
+      AiProvider.lmStudio =>
+        '${serverUrl.replaceAll(RegExp(r'/+$'), '')}/v1/models',
+      AiProvider.gemini =>
+        'https://generativelanguage.googleapis.com/v1beta/openai/models',
+      AiProvider.openRouter => 'https://openrouter.ai/api/v1/models',
+    };
+  }
+
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    serverUrl = prefs.getString('server_url') ?? serverUrl;
-    apiKey = await _secureStorage.read(key: 'api_key') ?? apiKey;
-    modelName = prefs.getString('model_name') ?? modelName;
+
+    final providerStr = prefs.getString('api_provider');
+    provider = AiProvider.values.firstWhere(
+      (e) => e.name == providerStr,
+      orElse: () => AiProvider.lmStudio,
+    );
+
+    lmStudioUrl = prefs.getString('lm_studio_server_url') ??
+        prefs.getString('server_url') ??
+        'http://localhost:1234';
+    lmStudioApiKey = await _secureStorage.read(key: 'lm_studio_api_key') ??
+        await _secureStorage.read(key: 'api_key') ??
+        '';
+    lmStudioModel = prefs.getString('lm_studio_model_name') ??
+        prefs.getString('model_name') ??
+        'local-model';
+
+    geminiApiKey = await _secureStorage.read(key: 'gemini_api_key') ?? '';
+    geminiModel = prefs.getString('gemini_model_name') ?? 'gemini-2.5-flash';
+
+    openRouterApiKey =
+        await _secureStorage.read(key: 'open_router_api_key') ?? '';
+    openRouterModel =
+        prefs.getString('open_router_model_name') ?? 'google/gemini-2.5-flash';
+
     gifFolderPath = prefs.getString('gif_folder');
     for (final state in AppState.values) {
       gifFiles[state] =
@@ -54,9 +174,25 @@ class SettingsStore {
 
   Future<void> save() async {
     final prefs = await SharedPreferences.getInstance();
+
+    await prefs.setString('api_provider', provider.name);
+
+    await prefs.setString('lm_studio_server_url', lmStudioUrl);
+    await _secureStorage.write(key: 'lm_studio_api_key', value: lmStudioApiKey);
+    await prefs.setString('lm_studio_model_name', lmStudioModel);
+
+    await _secureStorage.write(key: 'gemini_api_key', value: geminiApiKey);
+    await prefs.setString('gemini_model_name', geminiModel);
+
+    await _secureStorage.write(
+        key: 'open_router_api_key', value: openRouterApiKey);
+    await prefs.setString('open_router_model_name', openRouterModel);
+
+    // Save legacy keys for maximum backward compatibility
     await prefs.setString('server_url', serverUrl);
     await _secureStorage.write(key: 'api_key', value: apiKey);
     await prefs.setString('model_name', modelName);
+
     if (gifFolderPath != null) {
       await prefs.setString('gif_folder', gifFolderPath!);
     } else {

@@ -62,13 +62,14 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   SettingsStore get _settings => widget.store;
   AppState _state = AppState.waiting;
-  bool _agentMode = true;
+  bool _agentMode = false;
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<Map<String, dynamic>> _messages = [];
   String? _gifPath;
   ValueNotifier<String>? _currentReplyNotifier;
   bool _stopRequested = false;
+  bool _expandedChat = false;
 
   @override
   void initState() {
@@ -148,23 +149,26 @@ class _ChatPageState extends State<ChatPage> {
 
     final client = http.Client();
     try {
-      final base = _settings.serverUrl.replaceAll(RegExp(r'/+$'), '');
-
       final List<Map<String, String>> messages = [
         if (_agentMode)
           {
             'role': 'system',
             'content':
-                'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences.',
+                'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.',
           },
         {'role': 'user', 'content': prompt},
       ];
 
       final request =
-          http.Request('POST', Uri.parse('$base/v1/chat/completions'));
+          http.Request('POST', Uri.parse(_settings.chatCompletionsUrl));
       request.headers['Content-Type'] = 'application/json';
       if (_settings.apiKey.isNotEmpty) {
         request.headers['Authorization'] = 'Bearer ${_settings.apiKey}';
+      }
+      if (_settings.provider == AiProvider.openRouter) {
+        request.headers['HTTP-Referer'] =
+            'https://github.com/alfuentes123/AI-Gif-Coder';
+        request.headers['X-Title'] = 'AI Gif Coder';
       }
       request.body = jsonEncode({
         'model': _settings.modelName,
@@ -222,9 +226,12 @@ class _ChatPageState extends State<ChatPage> {
                 final delta = choices[0]['delta'];
                 if (delta != null && delta['content'] != null) {
                   reply += delta['content'];
-                  _currentReplyNotifier?.value = reply;
+                  final filtered = _filterThoughts(reply);
+                  _currentReplyNotifier?.value = filtered;
                   _scrollToEnd();
-                  updateTypingState();
+                  if (filtered.isNotEmpty) {
+                    updateTypingState();
+                  }
                 }
               }
             } catch (_) {}
@@ -235,7 +242,7 @@ class _ChatPageState extends State<ChatPage> {
 
         if (mounted) {
           setState(() {
-            _messages.last['content'] = reply;
+            _messages.last['content'] = _filterThoughts(reply);
             _messages.last.remove('notifier');
           });
         }
@@ -257,7 +264,14 @@ class _ChatPageState extends State<ChatPage> {
           }
         }
       } else {
-        _addSystemMessage('Server error: ${response.statusCode}');
+        final errBody = await response.stream.bytesToString();
+        try {
+          final errJson = jsonDecode(errBody);
+          final errMsg = errJson['error']?['message'] ?? errBody;
+          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
+        } catch (_) {
+          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
+        }
       }
     } catch (e) {
       _addSystemMessage('Connection error: $e');
@@ -270,6 +284,19 @@ class _ChatPageState extends State<ChatPage> {
         });
       }
     }
+  }
+
+  String _filterThoughts(String text) {
+    // Filter fully-closed tags
+    String filtered = text.replaceAll(
+        RegExp(r'<(think|thought)>[\s\S]*?<\/\1>', caseSensitive: false), '');
+    // Strip any unclosed tag and everything following it
+    final openIndex =
+        filtered.toLowerCase().lastIndexOf(RegExp(r'<(think|thought)'));
+    if (openIndex != -1) {
+      filtered = filtered.substring(0, openIndex);
+    }
+    return filtered.trim();
   }
 
   Future<void> _openSettings() async {
@@ -423,8 +450,60 @@ class _ChatPageState extends State<ChatPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 88),
+                    if (_messages.isNotEmpty)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: InkWell(
+                            onTap: () =>
+                                setState(() => _expandedChat = !_expandedChat),
+                            borderRadius: BorderRadius.circular(12),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.4),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.1),
+                                  width: 0.5,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _expandedChat
+                                        ? Icons.unfold_less_rounded
+                                        : Icons.unfold_more_rounded,
+                                    size: 12,
+                                    color: Colors.white.withValues(alpha: 0.7),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    _expandedChat ? 'COLLAPSE' : 'EXPAND',
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.5,
+                                      color:
+                                          Colors.white.withValues(alpha: 0.7),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeInOut,
+                      constraints: BoxConstraints(
+                        maxHeight:
+                            _messages.isEmpty ? 0 : (_expandedChat ? 600 : 88),
+                      ),
                       child: _messages.isEmpty
                           ? const SizedBox.shrink()
                           : ListView.builder(

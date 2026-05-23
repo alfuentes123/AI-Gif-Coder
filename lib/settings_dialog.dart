@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -17,6 +19,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _urlController;
   late final TextEditingController _apiKeyController;
   late final TextEditingController _modelController;
+
+  late AiProvider _selectedProvider;
+  late String _lmStudioUrl;
+  late String _lmStudioApiKey;
+  late String _lmStudioModel;
+  late String _geminiApiKey;
+  late String _geminiModel;
+  late String _openRouterApiKey;
+  late String _openRouterModel;
+
   List<String> _availableGifs = [];
   String? _connectionStatus;
   bool _testingConnection = false;
@@ -26,10 +38,76 @@ class _SettingsDialogState extends State<SettingsDialog> {
   @override
   void initState() {
     super.initState();
-    _urlController = TextEditingController(text: _store.serverUrl);
-    _apiKeyController = TextEditingController(text: _store.apiKey);
-    _modelController = TextEditingController(text: _store.modelName);
+    _selectedProvider = _store.provider;
+    _lmStudioUrl = _store.lmStudioUrl;
+    _lmStudioApiKey = _store.lmStudioApiKey;
+    _lmStudioModel = _store.lmStudioModel;
+    _geminiApiKey = _store.geminiApiKey;
+    _geminiModel = _store.geminiModel;
+    _openRouterApiKey = _store.openRouterApiKey;
+    _openRouterModel = _store.openRouterModel;
+
+    _urlController = TextEditingController(text: _lmStudioUrl);
+    _apiKeyController =
+        TextEditingController(text: _getApiKeyForProvider(_selectedProvider));
+    _modelController =
+        TextEditingController(text: _getModelForProvider(_selectedProvider));
+
     _refreshGifList();
+  }
+
+  String _getApiKeyForProvider(AiProvider provider) {
+    return switch (provider) {
+      AiProvider.lmStudio => _lmStudioApiKey,
+      AiProvider.gemini => _geminiApiKey,
+      AiProvider.openRouter => _openRouterApiKey,
+    };
+  }
+
+  String _getModelForProvider(AiProvider provider) {
+    return switch (provider) {
+      AiProvider.lmStudio => _lmStudioModel,
+      AiProvider.gemini => _geminiModel,
+      AiProvider.openRouter => _openRouterModel,
+    };
+  }
+
+  void _saveCurrentFields() {
+    switch (_selectedProvider) {
+      case AiProvider.lmStudio:
+        _lmStudioUrl = _urlController.text.trim();
+        _lmStudioApiKey = _apiKeyController.text.trim();
+        _lmStudioModel = _modelController.text.trim();
+        break;
+      case AiProvider.gemini:
+        _geminiApiKey = _apiKeyController.text.trim();
+        _geminiModel = _modelController.text.trim();
+        break;
+      case AiProvider.openRouter:
+        _openRouterApiKey = _apiKeyController.text.trim();
+        _openRouterModel = _modelController.text.trim();
+        break;
+    }
+  }
+
+  void _loadFieldsForProvider(AiProvider provider) {
+    _selectedProvider = provider;
+    switch (provider) {
+      case AiProvider.lmStudio:
+        _urlController.text = _lmStudioUrl;
+        _apiKeyController.text = _lmStudioApiKey;
+        _modelController.text = _lmStudioModel;
+        break;
+      case AiProvider.gemini:
+        _apiKeyController.text = _geminiApiKey;
+        _modelController.text = _geminiModel;
+        break;
+      case AiProvider.openRouter:
+        _apiKeyController.text = _openRouterApiKey;
+        _modelController.text = _openRouterModel;
+        break;
+    }
+    _connectionStatus = null;
   }
 
   @override
@@ -85,19 +163,94 @@ class _SettingsDialogState extends State<SettingsDialog> {
       _testingConnection = true;
       _connectionStatus = null;
     });
-    final base = _urlController.text.trim().replaceAll(RegExp(r'/+$'), '');
+    _saveCurrentFields();
+
     try {
-      final apiKey = _apiKeyController.text.trim();
-      final headers =
-          apiKey.isNotEmpty ? {'Authorization': 'Bearer $apiKey'} : null;
+      final modelName = _modelController.text.trim();
+      if (modelName.isEmpty) {
+        setState(() {
+          _connectionStatus = 'Model name is required';
+          _testingConnection = false;
+        });
+        return;
+      }
+
+      String testUrl;
+      final Map<String, String> headers = {
+        'Content-Type': 'application/json',
+      };
+
+      switch (_selectedProvider) {
+        case AiProvider.lmStudio:
+          final base = _urlController.text.trim().replaceAll(RegExp(r'/+$'), '');
+          testUrl = '$base/v1/chat/completions';
+          final key = _apiKeyController.text.trim();
+          if (key.isNotEmpty) {
+            headers['Authorization'] = 'Bearer $key';
+          }
+          break;
+        case AiProvider.gemini:
+          testUrl =
+              'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['Authorization'] = 'Bearer $key';
+          break;
+        case AiProvider.openRouter:
+          testUrl = 'https://openrouter.ai/api/v1/chat/completions';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['Authorization'] = 'Bearer $key';
+          headers['HTTP-Referer'] =
+              'https://github.com/alfuentes123/AI-Gif-Coder';
+          headers['X-Title'] = 'AI Gif Coder';
+          break;
+      }
+
       final response = await http
-          .get(Uri.parse('$base/v1/models'), headers: headers)
-          .timeout(const Duration(seconds: 8));
+          .post(
+            Uri.parse(testUrl),
+            headers: headers,
+            body: jsonEncode({
+              'model': modelName,
+              'messages': [
+                {'role': 'user', 'content': 'ping'}
+              ],
+              'max_tokens': 1,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
       if (!mounted) return;
       setState(() {
-        _connectionStatus = response.statusCode == 200
-            ? 'Connected successfully'
-            : 'Server returned HTTP ${response.statusCode}';
+        if (response.statusCode == 200) {
+          _connectionStatus = 'Connected successfully';
+        } else {
+          String errorMsg;
+          try {
+            final body = jsonDecode(response.body);
+            errorMsg = body['error']?['message'] ?? 'Status code ${response.statusCode}';
+          } catch (_) {
+            errorMsg = response.body.isNotEmpty
+                ? (response.body.length > 100
+                    ? '${response.body.substring(0, 100)}...'
+                    : response.body)
+                : 'Status code ${response.statusCode}';
+          }
+          _connectionStatus = 'Failed: $errorMsg';
+        }
       });
     } catch (e) {
       if (!mounted) return;
@@ -108,9 +261,17 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   Future<void> _saveAndClose() async {
-    _store.serverUrl = _urlController.text.trim();
-    _store.apiKey = _apiKeyController.text.trim();
-    _store.modelName = _modelController.text.trim();
+    _saveCurrentFields();
+
+    _store.provider = _selectedProvider;
+    _store.lmStudioUrl = _lmStudioUrl;
+    _store.lmStudioApiKey = _lmStudioApiKey;
+    _store.lmStudioModel = _lmStudioModel;
+    _store.geminiApiKey = _geminiApiKey;
+    _store.geminiModel = _geminiModel;
+    _store.openRouterApiKey = _openRouterApiKey;
+    _store.openRouterModel = _openRouterModel;
+
     await _store.save();
     if (mounted) Navigator.pop(context, true);
   }
@@ -128,12 +289,67 @@ class _SettingsDialogState extends State<SettingsDialog> {
               const Text('Connection',
                   style: TextStyle(fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
-              TextField(
-                controller: _urlController,
+              DropdownButtonFormField<AiProvider>(
+                initialValue: _selectedProvider,
                 decoration: const InputDecoration(
-                  labelText: 'Connection URL',
+                  labelText: 'API Provider',
                   isDense: true,
                   border: OutlineInputBorder(),
+                ),
+                items: AiProvider.values
+                    .map((p) => DropdownMenuItem(
+                          value: p,
+                          child: Text(p.label),
+                        ))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    setState(() {
+                      _saveCurrentFields();
+                      _loadFieldsForProvider(v);
+                    });
+                  }
+                },
+              ),
+              const SizedBox(height: 12),
+              AnimatedSize(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeInOut,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_selectedProvider == AiProvider.lmStudio) ...[
+                      TextField(
+                        controller: _urlController,
+                        decoration: const InputDecoration(
+                          labelText: 'Connection URL',
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    TextField(
+                      controller: _apiKeyController,
+                      decoration: InputDecoration(
+                        labelText: _selectedProvider == AiProvider.lmStudio
+                            ? 'API Key (Optional)'
+                            : 'API Key',
+                        isDense: true,
+                        border: const OutlineInputBorder(),
+                      ),
+                      obscureText: true,
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _modelController,
+                      decoration: const InputDecoration(
+                        labelText: 'Model name',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 8),
@@ -152,7 +368,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      _connectionStatus ?? 'Test reachability to /v1/models',
+                      _connectionStatus ?? 'Test connection (consumes 1 request)',
                       style: TextStyle(
                         fontSize: 12,
                         color: _connectionStatus == null
@@ -164,25 +380,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _apiKeyController,
-                decoration: const InputDecoration(
-                  labelText: 'API Key',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                obscureText: true,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _modelController,
-                decoration: const InputDecoration(
-                  labelText: 'Model name',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
               ),
               const Divider(height: 28),
               const Text('Background GIFs',
