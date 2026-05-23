@@ -182,7 +182,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
       switch (_selectedProvider) {
         case AiProvider.lmStudio:
-          final base = _urlController.text.trim().replaceAll(RegExp(r'/+$'), '');
+          final base =
+              _urlController.text.trim().replaceAll(RegExp(r'/+$'), '');
           testUrl = '$base/v1/chat/completions';
           final key = _apiKeyController.text.trim();
           if (key.isNotEmpty) {
@@ -241,7 +242,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
           String errorMsg;
           try {
             final body = jsonDecode(response.body);
-            errorMsg = body['error']?['message'] ?? 'Status code ${response.statusCode}';
+            errorMsg = body['error']?['message'] ??
+                'Status code ${response.statusCode}';
           } catch (_) {
             errorMsg = response.body.isNotEmpty
                 ? (response.body.length > 100
@@ -276,182 +278,220 @@ class _SettingsDialogState extends State<SettingsDialog> {
     if (mounted) Navigator.pop(context, true);
   }
 
+  Widget _buildConnectionTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: 8, left: 2, right: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DropdownButtonFormField<AiProvider>(
+            initialValue: _selectedProvider,
+            decoration: const InputDecoration(
+              labelText: 'API Provider',
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+            items: AiProvider.values
+                .map((p) => DropdownMenuItem(
+                      value: p,
+                      child: Text(p.label),
+                    ))
+                .toList(),
+            onChanged: (v) {
+              if (v != null) {
+                setState(() {
+                  _saveCurrentFields();
+                  _loadFieldsForProvider(v);
+                });
+              }
+            },
+          ),
+          const SizedBox(height: 12),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeInOut,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_selectedProvider == AiProvider.lmStudio) ...[
+                  TextField(
+                    controller: _urlController,
+                    decoration: const InputDecoration(
+                      labelText: 'Connection URL',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                TextField(
+                  controller: _apiKeyController,
+                  decoration: InputDecoration(
+                    labelText: _selectedProvider == AiProvider.lmStudio
+                        ? 'API Key (Optional)'
+                        : 'API Key',
+                    isDense: true,
+                    border: const OutlineInputBorder(),
+                  ),
+                  obscureText: true,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _modelController,
+                  decoration: const InputDecoration(
+                    labelText: 'Model name',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              FilledButton.tonal(
+                onPressed: _testingConnection ? null : _testConnection,
+                child: _testingConnection
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Test'),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _connectionStatus ?? 'Test connection (consumes 1 request)',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _connectionStatus == null
+                        ? Colors.grey
+                        : _connectionStatus!.startsWith('Connected')
+                            ? Colors.greenAccent
+                            : Colors.orangeAccent,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGifsTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: 8, left: 2, right: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickGifFolder,
+                  icon: const Icon(Icons.folder_open, size: 18),
+                  label: const Text('Choose GIF folder'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton.icon(
+                onPressed: _restoreDefaultGifs,
+                icon: const Icon(Icons.restore, size: 18),
+                label: const Text('Restore defaults'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _store.gifFolderPath ?? 'No folder selected',
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (_store.gifFolderPath != null && _availableGifs.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                'No .gif files found in this folder.',
+                style: TextStyle(fontSize: 11, color: Colors.orangeAccent),
+              ),
+            ),
+          if (_availableGifs.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            for (final state in AppState.values)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: DropdownButtonFormField<String>(
+                  initialValue:
+                      _availableGifs.contains(_store.gifFiles[state])
+                          ? _store.gifFiles[state]
+                          : null,
+                  decoration: InputDecoration(
+                    labelText: state.label,
+                    isDense: true,
+                    border: const OutlineInputBorder(),
+                  ),
+                  items: _availableGifs
+                      .map(
+                          (f) => DropdownMenuItem(value: f, child: Text(f)))
+                      .toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setState(() => _store.gifFiles[state] = v);
+                    }
+                  },
+                ),
+              ),
+          ],
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Settings'),
-      content: SizedBox(
-        width: 420,
-        child: SingleChildScrollView(
+    return DefaultTabController(
+      length: 2,
+      child: AlertDialog(
+        title: const Text('Settings'),
+        content: SizedBox(
+          width: 440,
+          height: 400,
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('Connection',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<AiProvider>(
-                initialValue: _selectedProvider,
-                decoration: const InputDecoration(
-                  labelText: 'API Provider',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                items: AiProvider.values
-                    .map((p) => DropdownMenuItem(
-                          value: p,
-                          child: Text(p.label),
-                        ))
-                    .toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() {
-                      _saveCurrentFields();
-                      _loadFieldsForProvider(v);
-                    });
-                  }
-                },
+              TabBar(
+                tabs: const [
+                  Tab(text: 'Connection'),
+                  Tab(text: 'GIFs'),
+                ],
+                indicatorColor: Theme.of(context).colorScheme.primary,
+                labelColor: Theme.of(context).colorScheme.primary,
+                unselectedLabelColor: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
-              const SizedBox(height: 12),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeInOut,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+              const SizedBox(height: 16),
+              Expanded(
+                child: TabBarView(
                   children: [
-                    if (_selectedProvider == AiProvider.lmStudio) ...[
-                      TextField(
-                        controller: _urlController,
-                        decoration: const InputDecoration(
-                          labelText: 'Connection URL',
-                          isDense: true,
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                    TextField(
-                      controller: _apiKeyController,
-                      decoration: InputDecoration(
-                        labelText: _selectedProvider == AiProvider.lmStudio
-                            ? 'API Key (Optional)'
-                            : 'API Key',
-                        isDense: true,
-                        border: const OutlineInputBorder(),
-                      ),
-                      obscureText: true,
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _modelController,
-                      decoration: const InputDecoration(
-                        labelText: 'Model name',
-                        isDense: true,
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
+                    _buildConnectionTab(),
+                    _buildGifsTab(),
                   ],
                 ),
               ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  FilledButton.tonal(
-                    onPressed: _testingConnection ? null : _testConnection,
-                    child: _testingConnection
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Test'),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      _connectionStatus ?? 'Test connection (consumes 1 request)',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: _connectionStatus == null
-                            ? Colors.grey
-                            : _connectionStatus!.startsWith('Connected')
-                                ? Colors.greenAccent
-                                : Colors.orangeAccent,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const Divider(height: 28),
-              const Text('Background GIFs',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: _pickGifFolder,
-                    icon: const Icon(Icons.folder_open, size: 18),
-                    label: const Text('Choose GIF folder'),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton.icon(
-                    onPressed: _restoreDefaultGifs,
-                    icon: const Icon(Icons.restore, size: 18),
-                    label: const Text('Restore defaults'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _store.gifFolderPath ?? 'No folder selected',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (_store.gifFolderPath != null && _availableGifs.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Text(
-                    'No .gif files found in this folder.',
-                    style: TextStyle(fontSize: 11, color: Colors.orangeAccent),
-                  ),
-                ),
-              if (_availableGifs.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                for (final state in AppState.values)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: DropdownButtonFormField<String>(
-                      initialValue:
-                          _availableGifs.contains(_store.gifFiles[state])
-                              ? _store.gifFiles[state]
-                              : null,
-                      decoration: InputDecoration(
-                        labelText: state.label,
-                        isDense: true,
-                        border: const OutlineInputBorder(),
-                      ),
-                      items: _availableGifs
-                          .map(
-                              (f) => DropdownMenuItem(value: f, child: Text(f)))
-                          .toList(),
-                      onChanged: (v) {
-                        if (v != null) {
-                          setState(() => _store.gifFiles[state] = v);
-                        }
-                      },
-                    ),
-                  ),
-              ],
             ],
           ),
         ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(onPressed: _saveAndClose, child: const Text('Save')),
+        ],
       ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel')),
-        FilledButton(onPressed: _saveAndClose, child: const Text('Save')),
-      ],
     );
   }
 }
