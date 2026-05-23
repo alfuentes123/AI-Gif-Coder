@@ -141,26 +141,6 @@ class _ChatPageState extends State<ChatPage> {
         : firstLine;
   }
 
-  List<Map<String, String>> _buildContextMessages() {
-    final history = _messages
-        .where((msg) =>
-            msg['role'] == 'user' || msg['role'] == 'assistant')
-        .map((msg) => {
-              'role': msg['role'] as String,
-              'content': msg['content'] as String,
-            })
-        .toList();
-    if (!_agentMode) return history;
-    return [
-      {
-        'role': 'system',
-        'content':
-            'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.',
-      },
-      ...history,
-    ];
-  }
-
   @override
   void dispose() {
     _stopRequested = true;
@@ -223,7 +203,15 @@ class _ChatPageState extends State<ChatPage> {
 
     final client = http.Client();
     try {
-      final List<Map<String, String>> messages = _buildContextMessages();
+      final List<Map<String, String>> messages = [
+        if (_agentMode)
+          {
+            'role': 'system',
+            'content':
+                'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.',
+          },
+        {'role': 'user', 'content': prompt},
+      ];
 
       final request =
           http.Request('POST', Uri.parse(_settings.chatCompletionsUrl));
