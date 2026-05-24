@@ -17,13 +17,14 @@ extension AppStateInfo on AppState {
   String get defaultFileName => '$name.gif';
 }
 
-enum AiProvider { lmStudio, gemini, openRouter }
+enum AiProvider { lmStudio, gemini, openRouter, jules }
 
 extension AiProviderExtension on AiProvider {
   String get label => switch (this) {
         AiProvider.lmStudio => 'LM Studio / Custom',
         AiProvider.gemini => 'Gemini',
         AiProvider.openRouter => 'OpenRouter',
+        AiProvider.jules => 'Jules (Google Labs)',
       };
 }
 
@@ -40,6 +41,10 @@ class SettingsStore {
   String openRouterApiKey = '';
   String openRouterModel = 'openrouter/owl-alpha';
 
+  String julesApiKey = '';
+  String? julesRepo;
+  String? julesBranch;
+
   String? gifFolderPath;
   final Map<AppState, String> gifFiles = {
     for (final s in AppState.values) s: s.defaultFileName,
@@ -54,6 +59,7 @@ class SettingsStore {
       AiProvider.gemini =>
         'https://generativelanguage.googleapis.com/v1beta/openai/',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1',
+      AiProvider.jules => 'https://jules.googleapis.com/v1alpha',
     };
   }
 
@@ -68,6 +74,7 @@ class SettingsStore {
       AiProvider.lmStudio => lmStudioApiKey,
       AiProvider.gemini => geminiApiKey,
       AiProvider.openRouter => openRouterApiKey,
+      AiProvider.jules => julesApiKey,
     };
   }
 
@@ -82,6 +89,9 @@ class SettingsStore {
       case AiProvider.openRouter:
         openRouterApiKey = val;
         break;
+      case AiProvider.jules:
+        julesApiKey = val;
+        break;
     }
   }
 
@@ -90,6 +100,7 @@ class SettingsStore {
       AiProvider.lmStudio => lmStudioModel,
       AiProvider.gemini => geminiModel,
       AiProvider.openRouter => openRouterModel,
+      AiProvider.jules => 'jules-coding-agent',
     };
   }
 
@@ -104,6 +115,8 @@ class SettingsStore {
       case AiProvider.openRouter:
         openRouterModel = val;
         break;
+      case AiProvider.jules:
+        break;
     }
   }
 
@@ -114,6 +127,7 @@ class SettingsStore {
       AiProvider.gemini =>
         'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1/chat/completions',
+      AiProvider.jules => 'https://jules.googleapis.com/v1alpha/sessions',
     };
   }
 
@@ -124,6 +138,7 @@ class SettingsStore {
       AiProvider.gemini =>
         'https://generativelanguage.googleapis.com/v1beta/openai/models',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1/models',
+      AiProvider.jules => 'https://jules.googleapis.com/v1alpha/sources',
     };
   }
 
@@ -153,6 +168,10 @@ class SettingsStore {
         await _secureStorage.read(key: 'open_router_api_key') ?? '';
     openRouterModel =
         prefs.getString('open_router_model_name') ?? 'google/gemini-2.5-flash';
+
+    julesApiKey = await _secureStorage.read(key: 'jules_api_key') ?? '';
+    julesRepo = prefs.getString('jules_repo');
+    julesBranch = prefs.getString('jules_branch');
 
     gifFolderPath = prefs.getString('gif_folder');
     for (final state in AppState.values) {
@@ -187,6 +206,18 @@ class SettingsStore {
     await _secureStorage.write(
         key: 'open_router_api_key', value: openRouterApiKey);
     await prefs.setString('open_router_model_name', openRouterModel);
+
+    await _secureStorage.write(key: 'jules_api_key', value: julesApiKey);
+    if (julesRepo != null) {
+      await prefs.setString('jules_repo', julesRepo!);
+    } else {
+      await prefs.remove('jules_repo');
+    }
+    if (julesBranch != null) {
+      await prefs.setString('jules_branch', julesBranch!);
+    } else {
+      await prefs.remove('jules_branch');
+    }
 
     // Save legacy keys for maximum backward compatibility
     await prefs.setString('server_url', serverUrl);

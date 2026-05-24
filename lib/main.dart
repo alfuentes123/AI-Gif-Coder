@@ -71,6 +71,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _stopRequested = false;
   bool _expandedChat = false;
 
+  String? _activeJulesSessionId;
+  Timer? _julesPollTimer;
+  final Set<String> _processedJulesActivities = {};
+
   @override
   void initState() {
     super.initState();
@@ -91,6 +95,7 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void dispose() {
     _stopRequested = true;
+    _julesPollTimer?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -138,6 +143,11 @@ class _ChatPageState extends State<ChatPage> {
     final prompt = _inputController.text.trim();
     if (prompt.isEmpty || _state != AppState.waiting) return;
     _stopRequested = false;
+
+    if (_settings.provider == AiProvider.jules) {
+      await _sendJulesMessage(prompt);
+      return;
+    }
 
     setState(() {
       _messages.add({'role': 'user', 'content': prompt});
@@ -286,6 +296,288 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _sendJulesMessage(String prompt) async {
+    _stopRequested = false;
+
+    final apiKey = _settings.julesApiKey;
+    final repo = _settings.julesRepo;
+    final branch = _settings.julesBranch;
+
+    if (apiKey.isEmpty || repo == null || branch == null) {
+      _addSystemMessage(
+          'Please configure Jules API key, GitHub repository, and branch in Settings first.');
+      setState(() {
+        _state = AppState.waiting;
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+      return;
+    }
+
+    setState(() {
+      _messages.add({'role': 'user', 'content': prompt});
+      _state = AppState.thinking;
+      _gifPath = _settings.getCachedGifPath(_state);
+    });
+    _inputController.clear();
+    _scrollToEnd();
+
+    final client = http.Client();
+    try {
+      String sessionId;
+      if (_activeJulesSessionId == null) {
+        _addSystemMessage('Creating new Jules session...');
+        final response = await client.post(
+          Uri.parse('https://jules.googleapis.com/v1alpha/sessions'),
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+          },
+          body: jsonEncode({
+            'prompt': prompt,
+            'sourceContext': {
+              'source': repo,
+              'githubRepoContext': {
+                'startingBranch': branch,
+              },
+            },
+            'title': 'Gif Coder Task',
+          }),
+        );
+
+        if (response.statusCode != 200) {
+          throw Exception(
+              'Failed to create session: ${response.statusCode} - ${response.body}');
+        }
+
+        final data = jsonDecode(response.body);
+        sessionId = data['name'] as String;
+        setState(() {
+          _activeJulesSessionId = sessionId;
+          _processedJulesActivities.clear();
+        });
+        _addSystemMessage('Session created: $sessionId');
+      } else {
+        sessionId = _activeJulesSessionId!;
+        _addSystemMessage('Sending message to active session...');
+
+        final response = await client.post(
+          Uri.parse(
+              'https://jules.googleapis.com/v1alpha/$sessionId:sendMessage'),
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+          },
+          body: jsonEncode({
+            'prompt': prompt,
+          }),
+        );
+
+        if (response.statusCode != 200) {
+          _addSystemMessage(
+              'Session might be completed. Creating a new session instead...');
+          _activeJulesSessionId = null;
+          await _sendJulesMessage(prompt);
+          return;
+        }
+      }
+
+      _startJulesPolling(sessionId, apiKey);
+    } catch (e) {
+      _addSystemMessage('Jules error: $e');
+      setState(() {
+        _state = AppState.waiting;
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+    } finally {
+      client.close();
+    }
+  }
+
+  void _startJulesPolling(String sessionId, String apiKey) {
+    _julesPollTimer?.cancel();
+
+    _pollJulesStatus(sessionId, apiKey);
+
+    _julesPollTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (!mounted || _stopRequested) {
+        timer.cancel();
+        if (mounted) {
+          setState(() {
+            _state = AppState.waiting;
+            _gifPath = _settings.getCachedGifPath(_state);
+          });
+        }
+        return;
+      }
+      _pollJulesStatus(sessionId, apiKey);
+    });
+  }
+
+  Future<void> _pollJulesStatus(String sessionId, String apiKey) async {
+    final client = http.Client();
+    try {
+      final sessionUrl = 'https://jules.googleapis.com/v1alpha/$sessionId';
+      final sessionResponse = await client.get(
+        Uri.parse(sessionUrl),
+        headers: {'X-Goog-Api-Key': apiKey},
+      );
+
+      if (!mounted) return;
+
+      String sessionStateStr = 'QUEUED';
+      if (sessionResponse.statusCode == 200) {
+        final sessionData = jsonDecode(sessionResponse.body);
+        sessionStateStr = (sessionData['state'] ?? 'QUEUED') as String;
+      }
+
+      AppState nextState = AppState.thinking;
+      if (sessionStateStr == 'IN_PROGRESS') {
+        nextState = AppState.working;
+      } else if (sessionStateStr == 'COMPLETED' ||
+          sessionStateStr == 'FAILED' ||
+          sessionStateStr == 'PAUSED') {
+        nextState = AppState.waiting;
+      } else if (sessionStateStr == 'AWAITING_PLAN_APPROVAL' ||
+          sessionStateStr == 'AWAITING_USER_FEEDBACK') {
+        nextState = AppState.replying;
+      }
+
+      if (_state != nextState) {
+        setState(() {
+          _state = nextState;
+          _gifPath = _settings.getCachedGifPath(_state);
+        });
+      }
+
+      final activitiesUrl =
+          'https://jules.googleapis.com/v1alpha/$sessionId/activities';
+      final activitiesResponse = await client.get(
+        Uri.parse(activitiesUrl),
+        headers: {'X-Goog-Api-Key': apiKey},
+      );
+
+      if (!mounted) return;
+
+      if (activitiesResponse.statusCode == 200) {
+        final data = jsonDecode(activitiesResponse.body);
+        final List<dynamic>? activities = data['activities'];
+        if (activities != null && activities.isNotEmpty) {
+          final sortedActivities = List.from(activities);
+          sortedActivities.sort((a, b) {
+            final aTime = a['createTime'] != null
+                ? DateTime.parse(a['createTime'] as String)
+                : DateTime.fromMillisecondsSinceEpoch(0);
+            final bTime = b['createTime'] != null
+                ? DateTime.parse(b['createTime'] as String)
+                : DateTime.fromMillisecondsSinceEpoch(0);
+            return aTime.compareTo(bTime);
+          });
+
+          for (final activity in sortedActivities) {
+            final actName = activity['name'] as String?;
+            if (actName == null ||
+                _processedJulesActivities.contains(actName)) {
+              continue;
+            }
+            _processedJulesActivities.add(actName);
+
+            if (activity['agentMessaged'] != null) {
+              final agentMsg =
+                  activity['agentMessaged']['agentMessage'] as String?;
+              if (agentMsg != null && agentMsg.trim().isNotEmpty) {
+                setState(() {
+                  _messages.add({
+                    'role': 'assistant',
+                    'content': _filterThoughts(agentMsg),
+                  });
+                });
+                _scrollToEnd();
+              }
+            } else if (activity['planGenerated'] != null) {
+              final plan = activity['planGenerated']['plan'];
+              final steps =
+                  plan != null ? plan['steps'] as List<dynamic>? : null;
+              String planText = 'Plan Generated:\n';
+              if (steps != null) {
+                for (var i = 0; i < steps.length; i++) {
+                  final step = steps[i];
+                  final desc = step['description'] ?? 'Step ${i + 1}';
+                  planText += '- $desc\n';
+                }
+              } else {
+                planText += 'No plan steps detailed.';
+              }
+
+              _addSystemMessage(planText);
+
+              if (sessionStateStr == 'AWAITING_PLAN_APPROVAL') {
+                _addPlanApprovalPrompt(sessionId, apiKey);
+              }
+            } else if (activity['progressUpdated'] != null) {
+              final title = activity['progressUpdated']['title'] ?? '';
+              final desc = activity['progressUpdated']['description'] ?? '';
+              if (title.isNotEmpty || desc.isNotEmpty) {
+                _addSystemMessage('Progress: $title - $desc');
+              }
+            } else if (activity['sessionCompleted'] != null) {
+              _addSystemMessage('Jules task completed successfully!');
+            } else if (activity['sessionFailed'] != null) {
+              _addSystemMessage('Jules task failed.');
+            }
+          }
+        }
+      }
+
+      if (sessionStateStr == 'COMPLETED' || sessionStateStr == 'FAILED') {
+        _julesPollTimer?.cancel();
+        _julesPollTimer = null;
+        _activeJulesSessionId = null;
+        setState(() {
+          _state = AppState.waiting;
+          _gifPath = _settings.getCachedGifPath(_state);
+        });
+      }
+    } catch (e) {
+      debugPrint('Error polling Jules: $e');
+    } finally {
+      client.close();
+    }
+  }
+
+  void _addPlanApprovalPrompt(String sessionId, String apiKey) {
+    setState(() {
+      _messages.add({
+        'role': 'system_action',
+        'content': 'Jules is waiting for plan approval.',
+        'actionLabel': 'Approve Plan',
+        'onAction': () async {
+          _addSystemMessage('Approving plan...');
+          try {
+            final response = await http.post(
+              Uri.parse(
+                  'https://jules.googleapis.com/v1alpha/$sessionId:approvePlan'),
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': apiKey,
+              },
+              body: jsonEncode({}),
+            );
+            if (response.statusCode == 200) {
+              _addSystemMessage('Plan approved successfully.');
+              _pollJulesStatus(sessionId, apiKey);
+            } else {
+              _addSystemMessage(
+                  'Failed to approve plan: ${response.statusCode} - ${response.body}');
+            }
+          } catch (e) {
+            _addSystemMessage('Error approving plan: $e');
+          }
+        }
+      });
+    });
+    _scrollToEnd();
+  }
+
   String _filterThoughts(String text) {
     // Filter fully-closed tags
     String filtered = text.replaceAll(
@@ -305,6 +597,7 @@ class _ChatPageState extends State<ChatPage> {
       builder: (_) => SettingsDialog(store: _settings),
     );
     if (saved == true && mounted) {
+      setState(() {});
       _refreshGif();
     }
   }
@@ -348,7 +641,44 @@ class _ChatPageState extends State<ChatPage> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(19),
-          child: image,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              image,
+              if (_settings.provider == AiProvider.jules)
+                Positioned(
+                  top: 12,
+                  left: 16,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurple.withValues(alpha: 0.8),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.purpleAccent.withValues(alpha: 0.5),
+                        width: 1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.purple.withValues(alpha: 0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Text(
+                      'JULES',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -356,6 +686,8 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isJules = _settings.provider == AiProvider.jules;
+    final displayAgentMode = !isJules && _agentMode;
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
@@ -386,50 +718,63 @@ class _ChatPageState extends State<ChatPage> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  GestureDetector(
-                    onTap: () => setState(() => _agentMode = !_agentMode),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _agentMode ? 'CODE FILE OUTPUT' : 'CHAT',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.white.withValues(alpha: 0.7),
-                            fontWeight: FontWeight.w500,
+                  Tooltip(
+                    message:
+                        isJules ? 'Code file output is disabled for Jules' : '',
+                    child: GestureDetector(
+                      onTap: isJules
+                          ? null
+                          : () => setState(() => _agentMode = !_agentMode),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            displayAgentMode ? 'CODE FILE OUTPUT' : 'CHAT',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isJules
+                                  ? Colors.white.withValues(alpha: 0.25)
+                                  : Colors.white.withValues(alpha: 0.7),
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 220),
-                          curve: Curves.easeInOut,
-                          width: 38,
-                          height: 20,
-                          margin: const EdgeInsets.only(right: 2),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(10),
-                            color: _agentMode
-                                ? const Color.fromARGB(255, 175, 175, 175)
-                                : const Color.fromARGB(58, 83, 83, 83),
-                          ),
-                          child: AnimatedAlign(
+                          const SizedBox(width: 8),
+                          AnimatedContainer(
                             duration: const Duration(milliseconds: 220),
                             curve: Curves.easeInOut,
-                            alignment: _agentMode
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-                            child: Container(
-                              width: 16,
-                              height: 16,
-                              margin: const EdgeInsets.symmetric(horizontal: 2),
-                              decoration: const BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: Colors.white,
+                            width: 38,
+                            height: 20,
+                            margin: const EdgeInsets.only(right: 2),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(10),
+                              color: isJules
+                                  ? const Color.fromARGB(20, 83, 83, 83)
+                                  : (displayAgentMode
+                                      ? const Color.fromARGB(255, 175, 175, 175)
+                                      : const Color.fromARGB(58, 83, 83, 83)),
+                            ),
+                            child: AnimatedAlign(
+                              duration: const Duration(milliseconds: 220),
+                              curve: Curves.easeInOut,
+                              alignment: displayAgentMode
+                                  ? Alignment.centerRight
+                                  : Alignment.centerLeft,
+                              child: Container(
+                                width: 16,
+                                height: 16,
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 2),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: isJules
+                                      ? Colors.white.withValues(alpha: 0.3)
+                                      : Colors.white,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                   IconButton(
@@ -514,11 +859,53 @@ class _ChatPageState extends State<ChatPage> {
                               itemBuilder: (context, index) {
                                 final msg = _messages[index];
                                 final isSystem = msg['role'] == 'system';
+                                final isSystemAction =
+                                    msg['role'] == 'system_action';
                                 final notifier =
                                     msg['notifier'] as ValueNotifier<String>?;
 
                                 Widget textWidget;
-                                if (notifier != null) {
+                                if (isSystemAction) {
+                                  final actionLabel =
+                                      msg['actionLabel'] as String;
+                                  final onAction =
+                                      msg['onAction'] as VoidCallback?;
+                                  textWidget = Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        msg['content'] as String,
+                                        style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 11,
+                                          height: 1.3,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      ElevatedButton(
+                                        onPressed: onAction == null
+                                            ? null
+                                            : () {
+                                                setState(() {
+                                                  msg['onAction'] =
+                                                      null; // disable
+                                                });
+                                                onAction();
+                                              },
+                                        style: ElevatedButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 6),
+                                          visualDensity: VisualDensity.compact,
+                                        ),
+                                        child: Text(actionLabel,
+                                            style:
+                                                const TextStyle(fontSize: 11)),
+                                      ),
+                                    ],
+                                  );
+                                } else if (notifier != null) {
                                   textWidget = ValueListenableBuilder<String>(
                                     valueListenable: notifier,
                                     builder: (context, content, _) => Text(

@@ -28,6 +28,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late String _geminiModel;
   late String _openRouterApiKey;
   late String _openRouterModel;
+  late String _julesApiKey;
+  String? _julesRepo;
+  String? _julesBranch;
+
+  List<Map<String, dynamic>> _julesSources = [];
+  List<String> _julesBranches = [];
+  bool _fetchingSources = false;
+  String? _sourcesError;
 
   List<String> _availableGifs = [];
   String? _connectionStatus;
@@ -46,6 +54,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _geminiModel = _store.geminiModel;
     _openRouterApiKey = _store.openRouterApiKey;
     _openRouterModel = _store.openRouterModel;
+    _julesApiKey = _store.julesApiKey;
+    _julesRepo = _store.julesRepo;
+    _julesBranch = _store.julesBranch;
 
     _urlController = TextEditingController(text: _lmStudioUrl);
     _apiKeyController =
@@ -54,6 +65,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
         TextEditingController(text: _getModelForProvider(_selectedProvider));
 
     _refreshGifList();
+    if (_selectedProvider == AiProvider.jules && _apiKeyController.text.trim().isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _fetchJulesSources();
+      });
+    }
   }
 
   String _getApiKeyForProvider(AiProvider provider) {
@@ -61,6 +77,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       AiProvider.lmStudio => _lmStudioApiKey,
       AiProvider.gemini => _geminiApiKey,
       AiProvider.openRouter => _openRouterApiKey,
+      AiProvider.jules => _julesApiKey,
     };
   }
 
@@ -69,6 +86,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       AiProvider.lmStudio => _lmStudioModel,
       AiProvider.gemini => _geminiModel,
       AiProvider.openRouter => _openRouterModel,
+      AiProvider.jules => 'jules-coding-agent',
     };
   }
 
@@ -86,6 +104,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
       case AiProvider.openRouter:
         _openRouterApiKey = _apiKeyController.text.trim();
         _openRouterModel = _modelController.text.trim();
+        break;
+      case AiProvider.jules:
+        _julesApiKey = _apiKeyController.text.trim();
         break;
     }
   }
@@ -106,8 +127,102 @@ class _SettingsDialogState extends State<SettingsDialog> {
         _apiKeyController.text = _openRouterApiKey;
         _modelController.text = _openRouterModel;
         break;
+      case AiProvider.jules:
+        _apiKeyController.text = _julesApiKey;
+        break;
     }
     _connectionStatus = null;
+  }
+
+  Future<void> _fetchJulesSources() async {
+    final key = _apiKeyController.text.trim();
+    if (key.isEmpty) {
+      setState(() {
+        _sourcesError = 'Please enter an API Key first';
+        _julesSources = [];
+      });
+      return;
+    }
+    setState(() {
+      _fetchingSources = true;
+      _sourcesError = null;
+    });
+    try {
+      final response = await http.get(
+        Uri.parse('https://jules.googleapis.com/v1alpha/sources'),
+        headers: {
+          'X-Goog-Api-Key': key,
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final List<dynamic>? sourcesJson = data['sources'];
+        if (sourcesJson != null) {
+          setState(() {
+            _julesSources = sourcesJson.cast<Map<String, dynamic>>();
+            _sourcesError = null;
+            
+            if (_julesRepo != null && !_julesSources.any((s) => s['name'] == _julesRepo)) {
+              _julesRepo = null;
+              _julesBranch = null;
+            }
+            if (_julesRepo == null && _julesSources.isNotEmpty) {
+              _julesRepo = _julesSources.first['name'] as String?;
+            }
+            _updateJulesBranches();
+          });
+        } else {
+          setState(() {
+            _julesSources = [];
+            _sourcesError = 'No connected sources found in Jules.';
+          });
+        }
+      } else {
+        setState(() {
+          _sourcesError = 'Failed to fetch sources: ${response.statusCode}';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _sourcesError = 'Error fetching sources: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _fetchingSources = false);
+      }
+    }
+  }
+
+  void _updateJulesBranches() {
+    if (_julesRepo == null) {
+      _julesBranches = [];
+      _julesBranch = null;
+      return;
+    }
+    final selectedSource = _julesSources.firstWhere(
+      (s) => s['name'] == _julesRepo,
+      orElse: () => {},
+    );
+    final githubRepo = selectedSource['githubRepo'] as Map<String, dynamic>?;
+    final branchesJson = githubRepo?['branches'] as List<dynamic>?;
+    if (branchesJson != null) {
+      _julesBranches = branchesJson
+          .map((b) => (b['displayName'] ?? b['name'] ?? '') as String)
+          .where((name) => name.isNotEmpty)
+          .toList();
+      if (_julesBranch != null && !_julesBranches.contains(_julesBranch)) {
+        _julesBranch = null;
+      }
+      if (_julesBranch == null && _julesBranches.isNotEmpty) {
+        _julesBranch = _julesBranches.first;
+      }
+    } else {
+      _julesBranches = [];
+      _julesBranch = null;
+    }
   }
 
   @override
@@ -218,21 +333,43 @@ class _SettingsDialogState extends State<SettingsDialog> {
               'https://github.com/alfuentes123/AI-Gif-Coder';
           headers['X-Title'] = 'AI Gif Coder';
           break;
+        case AiProvider.jules:
+          testUrl = 'https://jules.googleapis.com/v1alpha/sources';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['X-Goog-Api-Key'] = key;
+          break;
       }
 
-      final response = await http
-          .post(
-            Uri.parse(testUrl),
-            headers: headers,
-            body: jsonEncode({
-              'model': modelName,
-              'messages': [
-                {'role': 'user', 'content': 'ping'}
-              ],
-              'max_tokens': 1,
-            }),
-          )
-          .timeout(const Duration(seconds: 10));
+      final http.Response response;
+      if (_selectedProvider == AiProvider.jules) {
+        response = await http
+            .get(
+              Uri.parse(testUrl),
+              headers: headers,
+            )
+            .timeout(const Duration(seconds: 10));
+      } else {
+        response = await http
+            .post(
+              Uri.parse(testUrl),
+              headers: headers,
+              body: jsonEncode({
+                'model': modelName,
+                'messages': [
+                  {'role': 'user', 'content': 'ping'}
+                ],
+                'max_tokens': 1,
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+      }
 
       if (!mounted) return;
       setState(() {
@@ -273,6 +410,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _store.geminiModel = _geminiModel;
     _store.openRouterApiKey = _openRouterApiKey;
     _store.openRouterModel = _openRouterModel;
+    _store.julesApiKey = _julesApiKey;
+    _store.julesRepo = _julesRepo;
+    _store.julesBranch = _julesBranch;
 
     await _store.save();
     if (mounted) Navigator.pop(context, true);
@@ -302,6 +442,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 setState(() {
                   _saveCurrentFields();
                   _loadFieldsForProvider(v);
+                  if (v == AiProvider.jules) {
+                    _fetchJulesSources();
+                  }
                 });
               }
             },
@@ -336,14 +479,106 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   obscureText: true,
                 ),
                 const SizedBox(height: 8),
-                TextField(
-                  controller: _modelController,
-                  decoration: const InputDecoration(
-                    labelText: 'Model name',
-                    isDense: true,
-                    border: OutlineInputBorder(),
+                if (_selectedProvider != AiProvider.jules) ...[
+                  TextField(
+                    controller: _modelController,
+                    decoration: const InputDecoration(
+                      labelText: 'Model name',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
                   ),
-                ),
+                ],
+                if (_selectedProvider == AiProvider.jules) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'GitHub Integration',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
+                      ),
+                      if (_fetchingSources)
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      else
+                        IconButton(
+                          icon: const Icon(Icons.refresh, size: 18),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _fetchJulesSources,
+                          tooltip: 'Fetch Repositories',
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  if (_sourcesError != null) ...[
+                    Text(
+                      _sourcesError!,
+                      style: const TextStyle(fontSize: 11, color: Colors.orangeAccent),
+                    ),
+                    const SizedBox(height: 6),
+                  ],
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(_julesSources),
+                    initialValue: _julesRepo,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'GitHub Repository',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    items: _julesSources.map((source) {
+                      final name = source['name'] as String;
+                      String displayName = name;
+                      if (name.startsWith('sources/')) {
+                        displayName = name.replaceFirst('sources/', '');
+                        if (displayName.startsWith('github/')) {
+                          displayName = displayName.replaceFirst('github/', '');
+                        }
+                      }
+                      return DropdownMenuItem<String>(
+                        value: name,
+                        child: Text(displayName, overflow: TextOverflow.ellipsis),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      setState(() {
+                        _julesRepo = val;
+                        _julesBranch = null;
+                        _updateJulesBranches();
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(_julesRepo),
+                    initialValue: _julesBranch,
+                    decoration: const InputDecoration(
+                      labelText: 'Branch',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    items: _julesBranches.map((branch) {
+                      return DropdownMenuItem<String>(
+                        value: branch,
+                        child: Text(branch),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      setState(() {
+                        _julesBranch = val;
+                      });
+                    },
+                  ),
+                ],
               ],
             ),
           ),
