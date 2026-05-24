@@ -340,6 +340,7 @@ class _ChatPageState extends State<ChatPage> {
                 'startingBranch': branch,
               },
             },
+            'automationMode': 'AUTO_CREATE_PR',
             'title': 'Gif Coder Task',
           }),
         );
