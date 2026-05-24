@@ -11,6 +11,9 @@ void main() {
     );
     await tester.pump();
 
+    expect(find.text('CHAT'), findsOneWidget);
+    await tester.tap(find.text('CHAT'));
+    await tester.pump();
     expect(find.text('CODE FILE OUTPUT'), findsOneWidget);
   });
 }
