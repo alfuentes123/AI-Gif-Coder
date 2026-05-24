@@ -14,8 +14,9 @@ Future<void> configureAppWindow() async {
   if (!isDesktopPlatform) return;
 
   await windowManager.ensureInitialized();
-  await windowManager.setMaximizable(false);
+  await windowManager.setMaximizable(true);
   _AppWindowListener.install();
+  await windowManager.setSize(kAppWindowSize);
   await _AppWindowListener.lockNormalSize();
 }
 
@@ -32,35 +33,27 @@ class _AppWindowListener with WindowListener {
     windowManager.addListener(instance);
   }
 
-  static Future<void> lockNormalSize() => instance._lockNormalSize();
+  static Future<void> lockNormalSize() => instance._applyConstraints();
 
-  Future<void> _lockNormalSize() async {
-    await windowManager.setMinimumSize(kAppWindowSize);
-    await windowManager.setMaximumSize(kAppWindowSize);
-    if (!_maximized) {
-      await windowManager.setSize(kAppWindowSize);
-    }
-  }
-
-  Future<void> _unlockSize() async {
-    await windowManager.setMinimumSize(const Size(320, 480));
-    await windowManager.setMaximumSize(const Size(10000, 10000));
+  Future<void> _applyConstraints() async {
+    await windowManager.setMinimumSize(Size(kAppWindowSize.width, kAppWindowSize.height));
+    await windowManager.setMaximumSize(Size(kAppWindowSize.width, 10000));
   }
 
   @override
   void onWindowMaximize() {
     _maximized = true;
-    _unlockSize();
+    _applyConstraints();
   }
 
   @override
   void onWindowUnmaximize() {
     _maximized = false;
-    _lockNormalSize();
+    _applyConstraints();
   }
 
   @override
   void onWindowRestore() {
-    if (!_maximized) _lockNormalSize();
+    if (!_maximized) _applyConstraints();
   }
 }
