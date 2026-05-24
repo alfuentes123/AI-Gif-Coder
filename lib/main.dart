@@ -105,7 +105,13 @@ class _ChatPageState extends State<ChatPage> {
     setState(() => _stopRequested = true);
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool force = false}) {
+    if (!force && _scrollController.hasClients) {
+      final position = _scrollController.position;
+      if (position.extentAfter > 40.0) {
+        return;
+      }
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       _scrollController.animateTo(
@@ -136,7 +142,7 @@ class _ChatPageState extends State<ChatPage> {
 
   void _addSystemMessage(String msg) {
     setState(() => _messages.add({'role': 'system', 'content': '> $msg'}));
-    _scrollToEnd();
+    _scrollToEnd(force: true);
   }
 
   Future<void> _sendMessage() async {
@@ -155,7 +161,7 @@ class _ChatPageState extends State<ChatPage> {
       _gifPath = _settings.getCachedGifPath(_state);
     });
     _inputController.clear();
-    _scrollToEnd();
+    _scrollToEnd(force: true);
 
     final client = http.Client();
     try {
@@ -319,7 +325,7 @@ class _ChatPageState extends State<ChatPage> {
       _gifPath = _settings.getCachedGifPath(_state);
     });
     _inputController.clear();
-    _scrollToEnd();
+    _scrollToEnd(force: true);
 
     final client = http.Client();
     try {
@@ -576,7 +582,7 @@ class _ChatPageState extends State<ChatPage> {
         }
       });
     });
-    _scrollToEnd();
+    _scrollToEnd(force: true);
   }
 
   String _filterThoughts(String text) {
@@ -590,6 +596,144 @@ class _ChatPageState extends State<ChatPage> {
       filtered = filtered.substring(0, openIndex);
     }
     return filtered.trim();
+  }
+
+  List<ContentBlock> _parseContent(String text) {
+    final List<ContentBlock> blocks = [];
+    final List<String> lines = text.split('\n');
+
+    BlockType currentState = BlockType.text;
+    String? currentHeading;
+    List<String> currentLines = [];
+
+    void commitBlock() {
+      if (currentLines.isEmpty && currentState == BlockType.text) return;
+      final content = currentLines.join('\n');
+      blocks.add(ContentBlock(
+        type: currentState,
+        content: content,
+        heading: currentHeading,
+      ));
+      currentLines = [];
+    }
+
+    for (final line in lines) {
+      if (currentState == BlockType.text) {
+        if (line.trimLeft().startsWith('```')) {
+          commitBlock();
+          currentState = BlockType.code;
+          final lang = line.trim().substring(3).trim();
+          currentHeading = lang.isNotEmpty ? lang : null;
+        } else if (line.trim().startsWith('[FILE:') && line.contains(']')) {
+          commitBlock();
+          currentState = BlockType.file;
+          final startIdx = line.indexOf('[FILE:') + 6;
+          final endIdx = line.indexOf(']', startIdx);
+          if (endIdx != -1) {
+            currentHeading = line.substring(startIdx, endIdx).trim();
+          } else {
+            currentHeading = 'file';
+          }
+        } else {
+          currentLines.add(line);
+        }
+      } else if (currentState == BlockType.code) {
+        if (line.trimLeft().startsWith('```')) {
+          commitBlock();
+          currentState = BlockType.text;
+          currentHeading = null;
+        } else {
+          currentLines.add(line);
+        }
+      } else if (currentState == BlockType.file) {
+        if (line.trim().contains('[/FILE]')) {
+          final idx = line.indexOf('[/FILE]');
+          final before = line.substring(0, idx);
+          if (before.isNotEmpty) {
+            currentLines.add(before);
+          }
+          commitBlock();
+          currentState = BlockType.text;
+          currentHeading = null;
+          final after = line.substring(idx + 7);
+          if (after.isNotEmpty) {
+            currentLines.add(after);
+          }
+        } else {
+          currentLines.add(line);
+        }
+      }
+    }
+
+    commitBlock();
+    return blocks;
+  }
+
+  Widget _buildMessageContent(String content, bool isSystem) {
+    final blocks = _parseContent(content);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: blocks.map((block) {
+        if (block.type == BlockType.text) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Text(
+              block.content,
+              style: TextStyle(
+                color: isSystem ? Colors.white54 : Colors.white.withValues(alpha: 0.95),
+                fontSize: isSystem ? 10 : 12,
+                height: 1.3,
+                fontStyle: isSystem ? FontStyle.italic : FontStyle.normal,
+              ),
+            ),
+          );
+        } else {
+          final isFile = block.type == BlockType.file;
+          return Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F1E36), // Deep rich blue
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: Colors.blueAccent.withValues(alpha: 0.3),
+                width: 1,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (block.heading != null && block.heading!.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      isFile ? 'FILE: ${block.heading}' : block.heading!.toUpperCase(),
+                      style: TextStyle(
+                        color: Colors.blueAccent.shade100,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                Text(
+                  block.content,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    color: Colors.white.withValues(alpha: 0.95),
+                    fontSize: 11,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+      }).toList(),
+    );
   }
 
   Future<void> _openSettings() async {
@@ -909,31 +1053,12 @@ class _ChatPageState extends State<ChatPage> {
                                 } else if (notifier != null) {
                                   textWidget = ValueListenableBuilder<String>(
                                     valueListenable: notifier,
-                                    builder: (context, content, _) => Text(
-                                      content,
-                                      style: TextStyle(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.95),
-                                        fontSize: 12,
-                                        height: 1.3,
-                                      ),
-                                    ),
+                                    builder: (context, content, _) =>
+                                        _buildMessageContent(content, isSystem),
                                   );
                                 } else {
-                                  textWidget = Text(
-                                    msg['content'] as String,
-                                    style: TextStyle(
-                                      color: isSystem
-                                          ? Colors.white54
-                                          : Colors.white
-                                              .withValues(alpha: 0.95),
-                                      fontSize: isSystem ? 10 : 12,
-                                      height: 1.3,
-                                      fontStyle: isSystem
-                                          ? FontStyle.italic
-                                          : FontStyle.normal,
-                                    ),
-                                  );
+                                  textWidget = _buildMessageContent(
+                                      msg['content'] as String, isSystem);
                                 }
 
                                 return Padding(
@@ -1009,3 +1134,22 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 }
+
+enum BlockType {
+  text,
+  code,
+  file,
+}
+
+class ContentBlock {
+  final BlockType type;
+  final String content;
+  final String? heading;
+
+  ContentBlock({
+    required this.type,
+    required this.content,
+    this.heading,
+  });
+}
+
