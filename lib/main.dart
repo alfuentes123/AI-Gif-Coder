@@ -13,6 +13,67 @@ import 'window_setup.dart';
 
 final SettingsStore appSettings = SettingsStore();
 
+List<Map<String, String>> buildChatTranscript(
+  List<Map<String, dynamic>> messages, {
+  String? nextUserPrompt,
+}) {
+  final transcript = <Map<String, String>>[];
+  for (final message in messages) {
+    final role = message['role'];
+    if (role != 'user' && role != 'assistant') continue;
+    if (message.containsKey('notifier')) continue;
+
+    final content = message['content'];
+    if (content is! String || content.trim().isEmpty) continue;
+
+    transcript.add({
+      'role': role as String,
+      'content': content,
+    });
+  }
+  if (nextUserPrompt != null && nextUserPrompt.trim().isNotEmpty) {
+    transcript.add({'role': 'user', 'content': nextUserPrompt});
+  }
+  return transcript;
+}
+
+String? geminiInteractionTextDelta(Map<String, dynamic> data) {
+  String? textFrom(dynamic value) {
+    if (value is String) return value;
+    if (value is Map) {
+      final text = value['text'] ?? value['content'] ?? value['delta'];
+      if (text is String) return text;
+
+      final parts = value['parts'];
+      if (parts is List) {
+        return parts
+            .whereType<Map>()
+            .map((part) => part['text'])
+            .whereType<String>()
+            .join();
+      }
+    }
+    return null;
+  }
+
+  final delta = data['delta'];
+  final deltaText = textFrom(delta);
+  if (deltaText != null) return deltaText;
+
+  final directText = textFrom(data);
+  if (directText != null) return directText;
+
+  final candidates = data['candidates'];
+  if (candidates is List && candidates.isNotEmpty) {
+    final first = candidates.first;
+    if (first is Map) {
+      return textFrom(first['content']);
+    }
+  }
+
+  return null;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final settingsReady = appSettings.load();
@@ -70,10 +131,14 @@ class _ChatPageState extends State<ChatPage> {
   ValueNotifier<String>? _currentReplyNotifier;
   bool _stopRequested = false;
   bool _expandedChat = false;
+  String? _lastGeminiInteractionId;
 
   String? _activeJulesSessionId;
   Timer? _julesPollTimer;
   final Set<String> _processedJulesActivities = {};
+
+  static const String _agentModeInstruction =
+      'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.';
 
   @override
   void initState() {
@@ -145,6 +210,23 @@ class _ChatPageState extends State<ChatPage> {
     _scrollToEnd(force: true);
   }
 
+  Future<void> _handleAgentFileOutput(String reply) async {
+    if (!_agentMode || _stopRequested) return;
+
+    final regExp = RegExp(r'\[FILE:\s*(.*?)\s*\]([\s\S]*?)\[\/FILE\]');
+    final matches = regExp.allMatches(reply);
+    if (matches.isEmpty) return;
+
+    setState(() {
+      _state = AppState.working;
+      _gifPath = _settings.getCachedGifPath(_state);
+    });
+    for (final match in matches) {
+      await _saveFile(match.group(1)!.trim(), match.group(2)!.trim());
+      await Future.delayed(const Duration(milliseconds: 2100));
+    }
+  }
+
   Future<void> _sendMessage() async {
     final prompt = _inputController.text.trim();
     if (prompt.isEmpty || _state != AppState.waiting) return;
@@ -155,6 +237,8 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
 
+    final transcript = buildChatTranscript(_messages, nextUserPrompt: prompt);
+
     setState(() {
       _messages.add({'role': 'user', 'content': prompt});
       _state = AppState.thinking;
@@ -163,16 +247,20 @@ class _ChatPageState extends State<ChatPage> {
     _inputController.clear();
     _scrollToEnd(force: true);
 
+    if (_settings.provider == AiProvider.gemini) {
+      await _sendGeminiInteraction(prompt);
+      return;
+    }
+
     final client = http.Client();
     try {
       final List<Map<String, String>> messages = [
         if (_agentMode)
           {
             'role': 'system',
-            'content':
-                'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.',
+            'content': _agentModeInstruction,
           },
-        {'role': 'user', 'content': prompt},
+        ...transcript,
       ];
 
       final request =
@@ -265,20 +353,7 @@ class _ChatPageState extends State<ChatPage> {
         _currentReplyNotifier?.dispose();
         _currentReplyNotifier = null;
 
-        if (_agentMode && !_stopRequested) {
-          final regExp = RegExp(r'\[FILE:\s*(.*?)\s*\]([\s\S]*?)\[\/FILE\]');
-          final matches = regExp.allMatches(reply);
-          if (matches.isNotEmpty) {
-            setState(() {
-              _state = AppState.working;
-              _gifPath = _settings.getCachedGifPath(_state);
-            });
-            for (final match in matches) {
-              await _saveFile(match.group(1)!.trim(), match.group(2)!.trim());
-              await Future.delayed(const Duration(milliseconds: 2100));
-            }
-          }
-        }
+        await _handleAgentFileOutput(reply);
       } else {
         final errBody = await response.stream.bytesToString();
         try {
@@ -289,6 +364,155 @@ class _ChatPageState extends State<ChatPage> {
           _addSystemMessage('Server error: ${response.statusCode} - $errBody');
         }
       }
+    } catch (e) {
+      _addSystemMessage('Connection error: $e');
+    } finally {
+      client.close();
+      if (mounted) {
+        setState(() {
+          _state = AppState.waiting;
+          _gifPath = _settings.getCachedGifPath(_state);
+        });
+      }
+    }
+  }
+
+  Future<void> _sendGeminiInteraction(String prompt) async {
+    final client = http.Client();
+    try {
+      final body = <String, dynamic>{
+        'model': _settings.modelName,
+        'input': prompt,
+        'stream': true,
+      };
+      if (_lastGeminiInteractionId != null) {
+        body['previous_interaction_id'] = _lastGeminiInteractionId;
+      }
+      if (_agentMode) {
+        body['system_instruction'] = _agentModeInstruction;
+      }
+
+      final request = http.Request(
+        'POST',
+        Uri.parse(
+            'https://generativelanguage.googleapis.com/v1beta/interactions'),
+      );
+      request.headers.addAll({
+        'Content-Type': 'application/json',
+        'x-goog-api-key': _settings.geminiApiKey,
+        'Api-Revision': '2026-05-20',
+      });
+      request.body = jsonEncode(body);
+
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        final errBody = await response.stream.bytesToString();
+        try {
+          final errJson = jsonDecode(errBody);
+          final errMsg = errJson['error']?['message'] ?? errBody;
+          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
+        } catch (_) {
+          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
+        }
+        return;
+      }
+
+      _currentReplyNotifier = ValueNotifier<String>('');
+      setState(() {
+        _messages.add({
+          'role': 'assistant',
+          'content': '',
+          'notifier': _currentReplyNotifier,
+        });
+        _state = AppState.thinking;
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+
+      String reply = '';
+      String? createdInteractionId;
+      String? currentSseEvent;
+      Timer? typingTimer;
+
+      void updateTypingState() {
+        if (!mounted) return;
+        if (_state != AppState.replying) {
+          setState(() {
+            _state = AppState.replying;
+            _gifPath = _settings.getCachedGifPath(_state);
+          });
+        }
+        typingTimer?.cancel();
+        typingTimer = Timer(const Duration(milliseconds: 1200), () {
+          if (mounted && _state == AppState.replying) {
+            setState(() {
+              _state = AppState.thinking;
+              _gifPath = _settings.getCachedGifPath(_state);
+            });
+          }
+        });
+      }
+
+      await for (final line in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (_stopRequested) break;
+        if (line.startsWith('event: ')) {
+          currentSseEvent = line.substring(7).trim();
+          continue;
+        }
+        if (!line.startsWith('data: ') || line.trim() == 'data: [DONE]') {
+          continue;
+        }
+
+        final dataStr = line.substring(6);
+        try {
+          final decoded = jsonDecode(dataStr);
+          if (decoded is! Map<String, dynamic>) continue;
+          final data = decoded;
+          final eventType =
+              data['event_type'] ?? data['type'] ?? currentSseEvent;
+          if (eventType == 'interaction.created') {
+            createdInteractionId = data['interaction']?['id'] as String?;
+          } else if (eventType == 'step.delta' ||
+              eventType == 'response.output_text.delta' ||
+              eventType == 'content.delta' ||
+              eventType == 'message.delta') {
+            final text = geminiInteractionTextDelta(data);
+            if (text != null) {
+              reply += text;
+              final filtered = _filterThoughts(reply);
+              _currentReplyNotifier?.value = filtered;
+              _scrollToEnd();
+              if (filtered.isNotEmpty) {
+                updateTypingState();
+              }
+            }
+          } else if (eventType == 'interaction.completed') {
+            final completedId =
+                data['interaction']?['id'] as String? ?? createdInteractionId;
+            if (!_stopRequested && completedId != null) {
+              _lastGeminiInteractionId = completedId;
+            }
+          } else if (eventType == 'error') {
+            final errorMessage =
+                data['error']?['message'] as String? ?? 'Unknown Gemini error';
+            _addSystemMessage('Gemini error: $errorMessage');
+          }
+        } catch (_) {}
+      }
+
+      typingTimer?.cancel();
+
+      if (mounted) {
+        setState(() {
+          _messages.last['content'] = _filterThoughts(reply);
+          _messages.last.remove('notifier');
+        });
+      }
+      _currentReplyNotifier?.dispose();
+      _currentReplyNotifier = null;
+
+      await _handleAgentFileOutput(reply);
     } catch (e) {
       _addSystemMessage('Connection error: $e');
     } finally {
@@ -681,7 +905,9 @@ class _ChatPageState extends State<ChatPage> {
             child: Text(
               block.content,
               style: TextStyle(
-                color: isSystem ? Colors.white54 : Colors.white.withValues(alpha: 0.95),
+                color: isSystem
+                    ? Colors.white54
+                    : Colors.white.withValues(alpha: 0.95),
                 fontSize: isSystem ? 10 : 12,
                 height: 1.3,
                 fontStyle: isSystem ? FontStyle.italic : FontStyle.normal,
@@ -710,7 +936,9 @@ class _ChatPageState extends State<ChatPage> {
                   Padding(
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Text(
-                      isFile ? 'FILE: ${block.heading}' : block.heading!.toUpperCase(),
+                      isFile
+                          ? 'FILE: ${block.heading}'
+                          : block.heading!.toUpperCase(),
                       style: TextStyle(
                         color: Colors.blueAccent.shade100,
                         fontSize: 10,
@@ -737,11 +965,15 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _openSettings() async {
+    final previousProvider = _settings.provider;
     final saved = await showDialog<bool>(
       context: context,
       builder: (_) => SettingsDialog(store: _settings),
     );
     if (saved == true && mounted) {
+      if (_settings.provider != previousProvider) {
+        _lastGeminiInteractionId = null;
+      }
       setState(() {});
       _refreshGif();
     }
@@ -795,7 +1027,8 @@ class _ChatPageState extends State<ChatPage> {
                   top: 12,
                   left: 16,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
                       color: Colors.deepPurple.withValues(alpha: 0.8),
                       borderRadius: BorderRadius.circular(8),
@@ -1152,4 +1385,3 @@ class ContentBlock {
     this.heading,
   });
 }
-
