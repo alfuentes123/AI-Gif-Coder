@@ -132,6 +132,8 @@ class _ChatPageState extends State<ChatPage> {
   bool _stopRequested = false;
   bool _expandedChat = false;
   String? _lastGeminiInteractionId;
+  String? _lastOpenAiResponseId;
+  String? _lastGroqResponseId;
 
   String? _activeJulesSessionId;
   Timer? _julesPollTimer;
@@ -251,6 +253,15 @@ class _ChatPageState extends State<ChatPage> {
       await _sendGeminiInteraction(prompt);
       return;
     }
+    if (_settings.provider == AiProvider.openAi ||
+        _settings.provider == AiProvider.groq) {
+      await _sendResponsesMessage(prompt);
+      return;
+    }
+    if (_settings.provider == AiProvider.claude) {
+      await _sendClaudeMessage(transcript);
+      return;
+    }
 
     final client = http.Client();
     try {
@@ -364,6 +375,296 @@ class _ChatPageState extends State<ChatPage> {
           _addSystemMessage('Server error: ${response.statusCode} - $errBody');
         }
       }
+    } catch (e) {
+      _addSystemMessage('Connection error: $e');
+    } finally {
+      client.close();
+      if (mounted) {
+        setState(() {
+          _state = AppState.waiting;
+          _gifPath = _settings.getCachedGifPath(_state);
+        });
+      }
+    }
+  }
+
+  String? get _lastResponsesApiId {
+    return switch (_settings.provider) {
+      AiProvider.openAi => _lastOpenAiResponseId,
+      AiProvider.groq => _lastGroqResponseId,
+      _ => null,
+    };
+  }
+
+  set _lastResponsesApiId(String? value) {
+    switch (_settings.provider) {
+      case AiProvider.openAi:
+        _lastOpenAiResponseId = value;
+        break;
+      case AiProvider.groq:
+        _lastGroqResponseId = value;
+        break;
+      case AiProvider.lmStudio:
+      case AiProvider.gemini:
+      case AiProvider.openRouter:
+      case AiProvider.jules:
+      case AiProvider.claude:
+      case AiProvider.deepSeek:
+        break;
+    }
+  }
+
+  Future<void> _sendResponsesMessage(String prompt) async {
+    final client = http.Client();
+    try {
+      final body = <String, dynamic>{
+        'model': _settings.modelName,
+        'input': prompt,
+        'stream': true,
+      };
+      final previousResponseId = _lastResponsesApiId;
+      if (previousResponseId != null) {
+        body['previous_response_id'] = previousResponseId;
+      }
+      if (_agentMode) {
+        body['instructions'] = _agentModeInstruction;
+      }
+
+      final request = http.Request('POST', Uri.parse(_settings.responsesUrl));
+      request.headers.addAll({
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${_settings.apiKey}',
+      });
+      request.body = jsonEncode(body);
+
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        final errBody = await response.stream.bytesToString();
+        try {
+          final errJson = jsonDecode(errBody);
+          final errMsg = errJson['error']?['message'] ?? errBody;
+          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
+        } catch (_) {
+          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
+        }
+        return;
+      }
+
+      _currentReplyNotifier = ValueNotifier<String>('');
+      setState(() {
+        _messages.add({
+          'role': 'assistant',
+          'content': '',
+          'notifier': _currentReplyNotifier,
+        });
+        _state = AppState.thinking;
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+
+      String reply = '';
+      String? createdResponseId;
+      String? currentSseEvent;
+      Timer? typingTimer;
+
+      void updateTypingState() {
+        if (!mounted) return;
+        if (_state != AppState.replying) {
+          setState(() {
+            _state = AppState.replying;
+            _gifPath = _settings.getCachedGifPath(_state);
+          });
+        }
+        typingTimer?.cancel();
+        typingTimer = Timer(const Duration(milliseconds: 1200), () {
+          if (mounted && _state == AppState.replying) {
+            setState(() {
+              _state = AppState.thinking;
+              _gifPath = _settings.getCachedGifPath(_state);
+            });
+          }
+        });
+      }
+
+      await for (final line in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (_stopRequested) break;
+        if (line.startsWith('event: ')) {
+          currentSseEvent = line.substring(7).trim();
+          continue;
+        }
+        if (!line.startsWith('data: ') || line.trim() == 'data: [DONE]') {
+          continue;
+        }
+
+        final dataStr = line.substring(6);
+        try {
+          final decoded = jsonDecode(dataStr);
+          if (decoded is! Map<String, dynamic>) continue;
+          final eventType = decoded['type'] ?? currentSseEvent;
+          if (eventType == 'response.created') {
+            createdResponseId = decoded['response']?['id'] as String?;
+          } else if (eventType == 'response.output_text.delta') {
+            final delta = decoded['delta'];
+            if (delta is String) {
+              reply += delta;
+              final filtered = _filterThoughts(reply);
+              _currentReplyNotifier?.value = filtered;
+              _scrollToEnd();
+              if (filtered.isNotEmpty) {
+                updateTypingState();
+              }
+            }
+          } else if (eventType == 'response.completed') {
+            final completedId =
+                decoded['response']?['id'] as String? ?? createdResponseId;
+            if (!_stopRequested && completedId != null) {
+              _lastResponsesApiId = completedId;
+            }
+          } else if (eventType == 'error') {
+            final errorMessage =
+                decoded['error']?['message'] as String? ?? 'Unknown API error';
+            _addSystemMessage('API error: $errorMessage');
+          }
+        } catch (_) {}
+      }
+
+      typingTimer?.cancel();
+
+      if (mounted) {
+        setState(() {
+          _messages.last['content'] = _filterThoughts(reply);
+          _messages.last.remove('notifier');
+        });
+      }
+      _currentReplyNotifier?.dispose();
+      _currentReplyNotifier = null;
+
+      await _handleAgentFileOutput(reply);
+    } catch (e) {
+      _addSystemMessage('Connection error: $e');
+    } finally {
+      client.close();
+      if (mounted) {
+        setState(() {
+          _state = AppState.waiting;
+          _gifPath = _settings.getCachedGifPath(_state);
+        });
+      }
+    }
+  }
+
+  Future<void> _sendClaudeMessage(List<Map<String, String>> transcript) async {
+    final client = http.Client();
+    try {
+      final body = <String, dynamic>{
+        'model': _settings.modelName,
+        'max_tokens': 4096,
+        'messages': transcript,
+        'stream': true,
+      };
+      if (_agentMode) {
+        body['system'] = _agentModeInstruction;
+      }
+
+      final request =
+          http.Request('POST', Uri.parse(_settings.chatCompletionsUrl));
+      request.headers.addAll({
+        'Content-Type': 'application/json',
+        'x-api-key': _settings.claudeApiKey,
+        'anthropic-version': '2023-06-01',
+      });
+      request.body = jsonEncode(body);
+
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        final errBody = await response.stream.bytesToString();
+        try {
+          final errJson = jsonDecode(errBody);
+          final errMsg = errJson['error']?['message'] ?? errBody;
+          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
+        } catch (_) {
+          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
+        }
+        return;
+      }
+
+      _currentReplyNotifier = ValueNotifier<String>('');
+      setState(() {
+        _messages.add({
+          'role': 'assistant',
+          'content': '',
+          'notifier': _currentReplyNotifier,
+        });
+        _state = AppState.thinking;
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+
+      String reply = '';
+      Timer? typingTimer;
+
+      void updateTypingState() {
+        if (!mounted) return;
+        if (_state != AppState.replying) {
+          setState(() {
+            _state = AppState.replying;
+            _gifPath = _settings.getCachedGifPath(_state);
+          });
+        }
+        typingTimer?.cancel();
+        typingTimer = Timer(const Duration(milliseconds: 1200), () {
+          if (mounted && _state == AppState.replying) {
+            setState(() {
+              _state = AppState.thinking;
+              _gifPath = _settings.getCachedGifPath(_state);
+            });
+          }
+        });
+      }
+
+      await for (final line in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (_stopRequested) break;
+        if (!line.startsWith('data: ')) continue;
+
+        final dataStr = line.substring(6);
+        try {
+          final decoded = jsonDecode(dataStr);
+          if (decoded is! Map<String, dynamic>) continue;
+          final type = decoded['type'];
+          if (type == 'content_block_delta') {
+            final delta = decoded['delta'];
+            final text = delta is Map ? delta['text'] : null;
+            if (text is String) {
+              reply += text;
+              final filtered = _filterThoughts(reply);
+              _currentReplyNotifier?.value = filtered;
+              _scrollToEnd();
+              if (filtered.isNotEmpty) {
+                updateTypingState();
+              }
+            }
+          } else if (type == 'error') {
+            final errorMessage = decoded['error']?['message'] as String? ??
+                'Unknown Claude error';
+            _addSystemMessage('Claude error: $errorMessage');
+          }
+        } catch (_) {}
+      }
+
+      typingTimer?.cancel();
+
+      if (mounted) {
+        setState(() {
+          _messages.last['content'] = _filterThoughts(reply);
+          _messages.last.remove('notifier');
+        });
+      }
+      _currentReplyNotifier?.dispose();
+      _currentReplyNotifier = null;
+
+      await _handleAgentFileOutput(reply);
     } catch (e) {
       _addSystemMessage('Connection error: $e');
     } finally {
@@ -902,7 +1203,7 @@ class _ChatPageState extends State<ChatPage> {
         if (block.type == BlockType.text) {
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 2),
-            child: Text(
+            child: SelectableText(
               block.content,
               style: TextStyle(
                 color: isSystem
@@ -935,7 +1236,7 @@ class _ChatPageState extends State<ChatPage> {
                 if (block.heading != null && block.heading!.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
+                    child: SelectableText(
                       isFile
                           ? 'FILE: ${block.heading}'
                           : block.heading!.toUpperCase(),
@@ -947,7 +1248,7 @@ class _ChatPageState extends State<ChatPage> {
                       ),
                     ),
                   ),
-                Text(
+                SelectableText(
                   block.content,
                   style: TextStyle(
                     fontFamily: 'monospace',
@@ -973,6 +1274,8 @@ class _ChatPageState extends State<ChatPage> {
     if (saved == true && mounted) {
       if (_settings.provider != previousProvider) {
         _lastGeminiInteractionId = null;
+        _lastOpenAiResponseId = null;
+        _lastGroqResponseId = null;
       }
       setState(() {});
       _refreshGif();
@@ -1030,7 +1333,7 @@ class _ChatPageState extends State<ChatPage> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: Colors.deepPurple.withValues(alpha: 0.8),
+                      color: const Color(0xFF210C44),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
                         color: Colors.purpleAccent.withValues(alpha: 0.5),
@@ -1045,7 +1348,7 @@ class _ChatPageState extends State<ChatPage> {
                       ],
                     ),
                     child: const Text(
-                      'JULES',
+                      'JULES BY GOOGLE',
                       style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.w900,
@@ -1252,7 +1555,7 @@ class _ChatPageState extends State<ChatPage> {
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
-                                      Text(
+                                      SelectableText(
                                         msg['content'] as String,
                                         style: const TextStyle(
                                           color: Colors.white70,

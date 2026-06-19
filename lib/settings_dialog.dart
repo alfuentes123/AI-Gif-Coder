@@ -29,6 +29,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late String _openRouterApiKey;
   late String _openRouterModel;
   late String _julesApiKey;
+  late String _claudeApiKey;
+  late String _claudeModel;
+  late String _groqApiKey;
+  late String _groqModel;
+  late String _openAiApiKey;
+  late String _openAiModel;
+  late String _deepSeekApiKey;
+  late String _deepSeekModel;
   String? _julesRepo;
   String? _julesBranch;
 
@@ -55,6 +63,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _openRouterApiKey = _store.openRouterApiKey;
     _openRouterModel = _store.openRouterModel;
     _julesApiKey = _store.julesApiKey;
+    _claudeApiKey = _store.claudeApiKey;
+    _claudeModel = _store.claudeModel;
+    _groqApiKey = _store.groqApiKey;
+    _groqModel = _store.groqModel;
+    _openAiApiKey = _store.openAiApiKey;
+    _openAiModel = _store.openAiModel;
+    _deepSeekApiKey = _store.deepSeekApiKey;
+    _deepSeekModel = _store.deepSeekModel;
     _julesRepo = _store.julesRepo;
     _julesBranch = _store.julesBranch;
 
@@ -65,7 +81,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
         TextEditingController(text: _getModelForProvider(_selectedProvider));
 
     _refreshGifList();
-    if (_selectedProvider == AiProvider.jules && _apiKeyController.text.trim().isNotEmpty) {
+    if (_selectedProvider == AiProvider.jules &&
+        _apiKeyController.text.trim().isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _fetchJulesSources();
       });
@@ -78,6 +95,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
       AiProvider.gemini => _geminiApiKey,
       AiProvider.openRouter => _openRouterApiKey,
       AiProvider.jules => _julesApiKey,
+      AiProvider.claude => _claudeApiKey,
+      AiProvider.groq => _groqApiKey,
+      AiProvider.openAi => _openAiApiKey,
+      AiProvider.deepSeek => _deepSeekApiKey,
     };
   }
 
@@ -87,6 +108,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
       AiProvider.gemini => _geminiModel,
       AiProvider.openRouter => _openRouterModel,
       AiProvider.jules => 'jules-coding-agent',
+      AiProvider.claude => _claudeModel,
+      AiProvider.groq => _groqModel,
+      AiProvider.openAi => _openAiModel,
+      AiProvider.deepSeek => _deepSeekModel,
     };
   }
 
@@ -107,6 +132,22 @@ class _SettingsDialogState extends State<SettingsDialog> {
         break;
       case AiProvider.jules:
         _julesApiKey = _apiKeyController.text.trim();
+        break;
+      case AiProvider.claude:
+        _claudeApiKey = _apiKeyController.text.trim();
+        _claudeModel = _modelController.text.trim();
+        break;
+      case AiProvider.groq:
+        _groqApiKey = _apiKeyController.text.trim();
+        _groqModel = _modelController.text.trim();
+        break;
+      case AiProvider.openAi:
+        _openAiApiKey = _apiKeyController.text.trim();
+        _openAiModel = _modelController.text.trim();
+        break;
+      case AiProvider.deepSeek:
+        _deepSeekApiKey = _apiKeyController.text.trim();
+        _deepSeekModel = _modelController.text.trim();
         break;
     }
   }
@@ -129,6 +170,22 @@ class _SettingsDialogState extends State<SettingsDialog> {
         break;
       case AiProvider.jules:
         _apiKeyController.text = _julesApiKey;
+        break;
+      case AiProvider.claude:
+        _apiKeyController.text = _claudeApiKey;
+        _modelController.text = _claudeModel;
+        break;
+      case AiProvider.groq:
+        _apiKeyController.text = _groqApiKey;
+        _modelController.text = _groqModel;
+        break;
+      case AiProvider.openAi:
+        _apiKeyController.text = _openAiApiKey;
+        _modelController.text = _openAiModel;
+        break;
+      case AiProvider.deepSeek:
+        _apiKeyController.text = _deepSeekApiKey;
+        _modelController.text = _deepSeekModel;
         break;
     }
     _connectionStatus = null;
@@ -163,8 +220,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
           setState(() {
             _julesSources = sourcesJson.cast<Map<String, dynamic>>();
             _sourcesError = null;
-            
-            if (_julesRepo != null && !_julesSources.any((s) => s['name'] == _julesRepo)) {
+
+            if (_julesRepo != null &&
+                !_julesSources.any((s) => s['name'] == _julesRepo)) {
               _julesRepo = null;
               _julesBranch = null;
             }
@@ -345,6 +403,55 @@ class _SettingsDialogState extends State<SettingsDialog> {
           }
           headers['X-Goog-Api-Key'] = key;
           break;
+        case AiProvider.claude:
+          testUrl = 'https://api.anthropic.com/v1/messages';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['x-api-key'] = key;
+          headers['anthropic-version'] = '2023-06-01';
+          break;
+        case AiProvider.groq:
+          testUrl = 'https://api.groq.com/openai/v1/responses';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['Authorization'] = 'Bearer $key';
+          break;
+        case AiProvider.openAi:
+          testUrl = 'https://api.openai.com/v1/responses';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['Authorization'] = 'Bearer $key';
+          break;
+        case AiProvider.deepSeek:
+          testUrl = 'https://api.deepseek.com/chat/completions';
+          final key = _apiKeyController.text.trim();
+          if (key.isEmpty) {
+            setState(() {
+              _connectionStatus = 'API Key is required';
+              _testingConnection = false;
+            });
+            return;
+          }
+          headers['Authorization'] = 'Bearer $key';
+          break;
       }
 
       final http.Response response;
@@ -353,6 +460,33 @@ class _SettingsDialogState extends State<SettingsDialog> {
             .get(
               Uri.parse(testUrl),
               headers: headers,
+            )
+            .timeout(const Duration(seconds: 10));
+      } else if (_selectedProvider == AiProvider.claude) {
+        response = await http
+            .post(
+              Uri.parse(testUrl),
+              headers: headers,
+              body: jsonEncode({
+                'model': modelName,
+                'max_tokens': 1,
+                'messages': [
+                  {'role': 'user', 'content': 'ping'}
+                ],
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+      } else if (_selectedProvider == AiProvider.openAi ||
+          _selectedProvider == AiProvider.groq) {
+        response = await http
+            .post(
+              Uri.parse(testUrl),
+              headers: headers,
+              body: jsonEncode({
+                'model': modelName,
+                'input': 'ping',
+                'max_output_tokens': 16,
+              }),
             )
             .timeout(const Duration(seconds: 10));
       } else {
@@ -411,6 +545,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _store.openRouterApiKey = _openRouterApiKey;
     _store.openRouterModel = _openRouterModel;
     _store.julesApiKey = _julesApiKey;
+    _store.claudeApiKey = _claudeApiKey;
+    _store.claudeModel = _claudeModel;
+    _store.groqApiKey = _groqApiKey;
+    _store.groqModel = _groqModel;
+    _store.openAiApiKey = _openAiApiKey;
+    _store.openAiModel = _openAiModel;
+    _store.deepSeekApiKey = _deepSeekApiKey;
+    _store.deepSeekModel = _deepSeekModel;
     _store.julesRepo = _julesRepo;
     _store.julesBranch = _julesBranch;
 
@@ -418,7 +560,44 @@ class _SettingsDialogState extends State<SettingsDialog> {
     if (mounted) Navigator.pop(context, true);
   }
 
+  Widget _buildProviderOption(AiProvider provider) {
+    final isJules = provider == AiProvider.jules;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: isJules
+            ? const Color(0xFF210C44)
+            : const Color(0xFF6B7280).withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isJules
+              ? const Color(0xFF210C44).withValues(alpha: 0.95)
+              : const Color(0xFF6B7280).withValues(alpha: 0.5),
+          width: 1,
+        ),
+      ),
+      child: Text(
+        provider.label,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: isJules
+              ? Colors.white
+              : const Color.fromARGB(255, 238, 238, 238)
+                  .withValues(alpha: 0.95),
+        ),
+      ),
+    );
+  }
+
   Widget _buildConnectionTab() {
+    final providerItems = [
+      ...AiProvider.values.where((p) => p != AiProvider.jules).toList()
+        ..sort((a, b) => a.label.compareTo(b.label)),
+      AiProvider.jules,
+    ];
+
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: 8, left: 2, right: 2),
       child: Column(
@@ -426,15 +605,27 @@ class _SettingsDialogState extends State<SettingsDialog> {
         children: [
           DropdownButtonFormField<AiProvider>(
             initialValue: _selectedProvider,
+            isDense: false,
+            isExpanded: true,
+            itemHeight: null,
             decoration: const InputDecoration(
               labelText: 'API Provider',
-              isDense: true,
               border: OutlineInputBorder(),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             ),
-            items: AiProvider.values
+            selectedItemBuilder: (context) => providerItems
+                .map(
+                  (p) => Align(
+                    alignment: Alignment.centerLeft,
+                    child: _buildProviderOption(p),
+                  ),
+                )
+                .toList(),
+            items: providerItems
                 .map((p) => DropdownMenuItem(
                       value: p,
-                      child: Text(p.label),
+                      child: _buildProviderOption(p),
                     ))
                 .toList(),
             onChanged: (v) {
@@ -522,7 +713,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   if (_sourcesError != null) ...[
                     Text(
                       _sourcesError!,
-                      style: const TextStyle(fontSize: 11, color: Colors.orangeAccent),
+                      style: const TextStyle(
+                          fontSize: 11, color: Colors.orangeAccent),
                     ),
                     const SizedBox(height: 6),
                   ],
@@ -546,7 +738,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                       }
                       return DropdownMenuItem<String>(
                         value: name,
-                        child: Text(displayName, overflow: TextOverflow.ellipsis),
+                        child:
+                            Text(displayName, overflow: TextOverflow.ellipsis),
                       );
                     }).toList(),
                     onChanged: (val) {
@@ -661,18 +854,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: DropdownButtonFormField<String>(
-                  initialValue:
-                      _availableGifs.contains(_store.gifFiles[state])
-                          ? _store.gifFiles[state]
-                          : null,
+                  initialValue: _availableGifs.contains(_store.gifFiles[state])
+                      ? _store.gifFiles[state]
+                      : null,
                   decoration: InputDecoration(
                     labelText: state.label,
                     isDense: true,
                     border: const OutlineInputBorder(),
                   ),
                   items: _availableGifs
-                      .map(
-                          (f) => DropdownMenuItem(value: f, child: Text(f)))
+                      .map((f) => DropdownMenuItem(value: f, child: Text(f)))
                       .toList(),
                   onChanged: (v) {
                     if (v != null) {
@@ -706,7 +897,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 ],
                 indicatorColor: Theme.of(context).colorScheme.primary,
                 labelColor: Theme.of(context).colorScheme.primary,
-                unselectedLabelColor: Theme.of(context).colorScheme.onSurfaceVariant,
+                unselectedLabelColor:
+                    Theme.of(context).colorScheme.onSurfaceVariant,
               ),
               const SizedBox(height: 16),
               Expanded(

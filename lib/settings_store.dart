@@ -17,14 +17,27 @@ extension AppStateInfo on AppState {
   String get defaultFileName => '$name.gif';
 }
 
-enum AiProvider { lmStudio, gemini, openRouter, jules }
+enum AiProvider {
+  lmStudio,
+  gemini,
+  openRouter,
+  jules,
+  claude,
+  groq,
+  openAi,
+  deepSeek,
+}
 
 extension AiProviderExtension on AiProvider {
   String get label => switch (this) {
         AiProvider.lmStudio => 'LM Studio / Custom',
-        AiProvider.gemini => 'Gemini',
+        AiProvider.gemini => 'Google AI Studio',
         AiProvider.openRouter => 'OpenRouter',
-        AiProvider.jules => 'Jules (Google Labs)',
+        AiProvider.jules => 'Jules by Google',
+        AiProvider.claude => 'Claude',
+        AiProvider.groq => 'Groq',
+        AiProvider.openAi => 'OpenAI',
+        AiProvider.deepSeek => 'DeepSeek',
       };
 }
 
@@ -45,6 +58,18 @@ class SettingsStore {
   String? julesRepo;
   String? julesBranch;
 
+  String claudeApiKey = '';
+  String claudeModel = 'claude-sonnet-4-5';
+
+  String groqApiKey = '';
+  String groqModel = 'llama-3.3-70b-versatile';
+
+  String openAiApiKey = '';
+  String openAiModel = 'gpt-5.5';
+
+  String deepSeekApiKey = '';
+  String deepSeekModel = 'deepseek-v4-flash';
+
   String? gifFolderPath;
   final Map<AppState, String> gifFiles = {
     for (final s in AppState.values) s: s.defaultFileName,
@@ -60,6 +85,10 @@ class SettingsStore {
         'https://generativelanguage.googleapis.com/v1beta/openai/',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1',
       AiProvider.jules => 'https://jules.googleapis.com/v1alpha',
+      AiProvider.claude => 'https://api.anthropic.com/v1',
+      AiProvider.groq => 'https://api.groq.com/openai/v1',
+      AiProvider.openAi => 'https://api.openai.com/v1',
+      AiProvider.deepSeek => 'https://api.deepseek.com',
     };
   }
 
@@ -75,6 +104,10 @@ class SettingsStore {
       AiProvider.gemini => geminiApiKey,
       AiProvider.openRouter => openRouterApiKey,
       AiProvider.jules => julesApiKey,
+      AiProvider.claude => claudeApiKey,
+      AiProvider.groq => groqApiKey,
+      AiProvider.openAi => openAiApiKey,
+      AiProvider.deepSeek => deepSeekApiKey,
     };
   }
 
@@ -92,6 +125,18 @@ class SettingsStore {
       case AiProvider.jules:
         julesApiKey = val;
         break;
+      case AiProvider.claude:
+        claudeApiKey = val;
+        break;
+      case AiProvider.groq:
+        groqApiKey = val;
+        break;
+      case AiProvider.openAi:
+        openAiApiKey = val;
+        break;
+      case AiProvider.deepSeek:
+        deepSeekApiKey = val;
+        break;
     }
   }
 
@@ -101,6 +146,10 @@ class SettingsStore {
       AiProvider.gemini => geminiModel,
       AiProvider.openRouter => openRouterModel,
       AiProvider.jules => 'jules-coding-agent',
+      AiProvider.claude => claudeModel,
+      AiProvider.groq => groqModel,
+      AiProvider.openAi => openAiModel,
+      AiProvider.deepSeek => deepSeekModel,
     };
   }
 
@@ -117,6 +166,18 @@ class SettingsStore {
         break;
       case AiProvider.jules:
         break;
+      case AiProvider.claude:
+        claudeModel = val;
+        break;
+      case AiProvider.groq:
+        groqModel = val;
+        break;
+      case AiProvider.openAi:
+        openAiModel = val;
+        break;
+      case AiProvider.deepSeek:
+        deepSeekModel = val;
+        break;
     }
   }
 
@@ -128,6 +189,18 @@ class SettingsStore {
         'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1/chat/completions',
       AiProvider.jules => 'https://jules.googleapis.com/v1alpha/sessions',
+      AiProvider.claude => 'https://api.anthropic.com/v1/messages',
+      AiProvider.groq => 'https://api.groq.com/openai/v1/chat/completions',
+      AiProvider.openAi => 'https://api.openai.com/v1/chat/completions',
+      AiProvider.deepSeek => 'https://api.deepseek.com/chat/completions',
+    };
+  }
+
+  String get responsesUrl {
+    return switch (provider) {
+      AiProvider.openAi => 'https://api.openai.com/v1/responses',
+      AiProvider.groq => 'https://api.groq.com/openai/v1/responses',
+      _ => chatCompletionsUrl,
     };
   }
 
@@ -139,6 +212,10 @@ class SettingsStore {
         'https://generativelanguage.googleapis.com/v1beta/openai/models',
       AiProvider.openRouter => 'https://openrouter.ai/api/v1/models',
       AiProvider.jules => 'https://jules.googleapis.com/v1alpha/sources',
+      AiProvider.claude => 'https://api.anthropic.com/v1/models',
+      AiProvider.groq => 'https://api.groq.com/openai/v1/models',
+      AiProvider.openAi => 'https://api.openai.com/v1/models',
+      AiProvider.deepSeek => 'https://api.deepseek.com/models',
     };
   }
 
@@ -172,6 +249,19 @@ class SettingsStore {
     julesApiKey = await _secureStorage.read(key: 'jules_api_key') ?? '';
     julesRepo = prefs.getString('jules_repo');
     julesBranch = prefs.getString('jules_branch');
+
+    claudeApiKey = await _secureStorage.read(key: 'claude_api_key') ?? '';
+    claudeModel = prefs.getString('claude_model_name') ?? 'claude-sonnet-4-5';
+
+    groqApiKey = await _secureStorage.read(key: 'groq_api_key') ?? '';
+    groqModel = prefs.getString('groq_model_name') ?? 'llama-3.3-70b-versatile';
+
+    openAiApiKey = await _secureStorage.read(key: 'open_ai_api_key') ?? '';
+    openAiModel = prefs.getString('open_ai_model_name') ?? 'gpt-5.5';
+
+    deepSeekApiKey = await _secureStorage.read(key: 'deep_seek_api_key') ?? '';
+    deepSeekModel =
+        prefs.getString('deep_seek_model_name') ?? 'deepseek-v4-flash';
 
     gifFolderPath = prefs.getString('gif_folder');
     for (final state in AppState.values) {
@@ -218,6 +308,18 @@ class SettingsStore {
     } else {
       await prefs.remove('jules_branch');
     }
+
+    await _secureStorage.write(key: 'claude_api_key', value: claudeApiKey);
+    await prefs.setString('claude_model_name', claudeModel);
+
+    await _secureStorage.write(key: 'groq_api_key', value: groqApiKey);
+    await prefs.setString('groq_model_name', groqModel);
+
+    await _secureStorage.write(key: 'open_ai_api_key', value: openAiApiKey);
+    await prefs.setString('open_ai_model_name', openAiModel);
+
+    await _secureStorage.write(key: 'deep_seek_api_key', value: deepSeekApiKey);
+    await prefs.setString('deep_seek_model_name', deepSeekModel);
 
     // Save legacy keys for maximum backward compatibility
     await prefs.setString('server_url', serverUrl);
