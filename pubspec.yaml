@@ -1,7 +1,7 @@
 name: gif_coder
-description: A custom UI for LM Studio with agentic file output.
+description: A reactive chatbot with file output.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
