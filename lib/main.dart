@@ -826,208 +826,240 @@ class _ChatPageState extends State<ChatPage> {
             ),
           ),
           SafeArea(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (_messages.isNotEmpty)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: InkWell(
-                            onTap: () =>
-                                setState(() => _expandedChat = !_expandedChat),
-                            borderRadius: BorderRadius.circular(12),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.4),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const menuClearance = 48.0;
+                const collapseControlHeight = 25.0;
+                const promptHeight = 40.0;
+                const verticalSpacing = 14.0;
+                final incompatibilityHeight =
+                    incompatibility == null ? 0.0 : 31.0;
+                final expandedChatHeight = (constraints.maxHeight -
+                        menuClearance -
+                        collapseControlHeight -
+                        promptHeight -
+                        verticalSpacing -
+                        incompatibilityHeight)
+                    .clamp(88.0, double.infinity)
+                    .toDouble();
+
+                return Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_messages.isNotEmpty)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: InkWell(
+                                onTap: () => setState(
+                                    () => _expandedChat = !_expandedChat),
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.1),
-                                  width: 0.5,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    _expandedChat
-                                        ? Icons.unfold_less_rounded
-                                        : Icons.unfold_more_rounded,
-                                    size: 12,
-                                    color: Colors.white.withValues(alpha: 0.7),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    _expandedChat ? 'COLLAPSE' : 'EXPAND',
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 0.5,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.4),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
                                       color:
-                                          Colors.white.withValues(alpha: 0.7),
+                                          Colors.white.withValues(alpha: 0.1),
+                                      width: 0.5,
                                     ),
                                   ),
-                                ],
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        _expandedChat
+                                            ? Icons.unfold_less_rounded
+                                            : Icons.unfold_more_rounded,
+                                        size: 12,
+                                        color:
+                                            Colors.white.withValues(alpha: 0.7),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        _expandedChat ? 'COLLAPSE' : 'EXPAND',
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w600,
+                                          letterSpacing: 0.5,
+                                          color: Colors.white
+                                              .withValues(alpha: 0.7),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeInOut,
-                      constraints: BoxConstraints(
-                        maxHeight:
-                            _messages.isEmpty ? 0 : (_expandedChat ? 600 : 88),
-                      ),
-                      child: _messages.isEmpty
-                          ? const SizedBox.shrink()
-                          : ListView.builder(
-                              controller: _scrollController,
-                              shrinkWrap: true,
-                              padding: EdgeInsets.zero,
-                              itemCount: _messages.length,
-                              itemBuilder: (context, index) {
-                                final msg = _messages[index];
-                                final isSystem = msg.role == 'system';
-                                final isSystemAction =
-                                    msg.role == 'system_action';
-                                final notifier = msg.notifier;
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeInOut,
+                          constraints: BoxConstraints(
+                            maxHeight: _messages.isEmpty
+                                ? 0
+                                : (_expandedChat ? expandedChatHeight : 88),
+                          ),
+                          child: _messages.isEmpty
+                              ? const SizedBox.shrink()
+                              : ListView.builder(
+                                  controller: _scrollController,
+                                  shrinkWrap: true,
+                                  padding: EdgeInsets.zero,
+                                  itemCount: _messages.length,
+                                  itemBuilder: (context, index) {
+                                    final msg = _messages[index];
+                                    final isSystem = msg.role == 'system';
+                                    final isSystemAction =
+                                        msg.role == 'system_action';
+                                    final notifier = msg.notifier;
 
-                                Widget textWidget;
-                                if (isSystemAction) {
-                                  textWidget = Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      SelectableText(
-                                        msg.content,
-                                        style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 11,
-                                          height: 1.3,
-                                          fontStyle: FontStyle.italic,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      ElevatedButton(
-                                        onPressed:
-                                            msg.kind == 'jules_plan_approval'
+                                    Widget textWidget;
+                                    if (isSystemAction) {
+                                      textWidget = Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          SelectableText(
+                                            msg.content,
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 11,
+                                              height: 1.3,
+                                              fontStyle: FontStyle.italic,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          ElevatedButton(
+                                            onPressed: msg.kind ==
+                                                    'jules_plan_approval'
                                                 ? () => _approveJulesPlan(
                                                       _activeChat!,
                                                     )
                                                 : null,
-                                        style: ElevatedButton.styleFrom(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 12, vertical: 6),
-                                          visualDensity: VisualDensity.compact,
-                                        ),
-                                        child: Text(msg.actionLabel ?? 'Action',
-                                            style:
-                                                const TextStyle(fontSize: 11)),
-                                      ),
-                                    ],
-                                  );
-                                } else if (notifier != null) {
-                                  textWidget = ValueListenableBuilder<String>(
-                                    valueListenable: notifier,
-                                    builder: (context, content, _) =>
-                                        _buildMessageContent(content, isSystem),
-                                  );
-                                } else {
-                                  textWidget = _buildMessageContent(
-                                      msg.content, isSystem);
-                                }
+                                            style: ElevatedButton.styleFrom(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 12,
+                                                      vertical: 6),
+                                              visualDensity:
+                                                  VisualDensity.compact,
+                                            ),
+                                            child: Text(
+                                                msg.actionLabel ?? 'Action',
+                                                style: const TextStyle(
+                                                    fontSize: 11)),
+                                          ),
+                                        ],
+                                      );
+                                    } else if (notifier != null) {
+                                      textWidget =
+                                          ValueListenableBuilder<String>(
+                                        valueListenable: notifier,
+                                        builder: (context, content, _) =>
+                                            _buildMessageContent(
+                                                content, isSystem),
+                                      );
+                                    } else {
+                                      textWidget = _buildMessageContent(
+                                          msg.content, isSystem);
+                                    }
 
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 4),
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 6, vertical: 4),
-                                      decoration: BoxDecoration(
-                                        color: Colors.black
-                                            .withValues(alpha: 0.65),
-                                        borderRadius: BorderRadius.circular(6),
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 4),
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.65),
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                          ),
+                                          child: textWidget,
+                                        ),
                                       ),
-                                      child: textWidget,
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                    const SizedBox(height: 6),
-                    if (incompatibility != null)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Text(
-                          incompatibility,
-                          style: const TextStyle(
-                            color: Colors.orangeAccent,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    Material(
-                      color: Colors.black.withValues(alpha: 0.55),
-                      borderRadius: BorderRadius.circular(10),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _inputController,
-                              enabled: _chatsLoaded &&
-                                  _state == AppState.waiting &&
-                                  incompatibility == null,
-                              style: const TextStyle(fontSize: 13),
-                              onSubmitted: (_) => _sendMessage(),
-                              decoration: InputDecoration(
-                                hintText: _state == AppState.waiting
-                                    ? 'Prompt…'
-                                    : _state.label,
-                                hintStyle: const TextStyle(fontSize: 13),
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 10,
+                                    );
+                                  },
                                 ),
+                        ),
+                        const SizedBox(height: 6),
+                        if (incompatibility != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Text(
+                              incompatibility,
+                              style: const TextStyle(
+                                color: Colors.orangeAccent,
+                                fontSize: 11,
                               ),
                             ),
                           ),
-                          if (_state != AppState.waiting)
-                            IconButton(
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(Icons.stop_circle_outlined,
-                                  size: 20),
-                              tooltip: 'Stop',
-                              color: Colors.redAccent,
-                              onPressed: _activeRuntime?.stopRequested == true
-                                  ? null
-                                  : _stopResponse,
-                            )
-                          else
-                            IconButton(
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(Icons.send_rounded, size: 20),
-                              onPressed:
-                                  incompatibility == null ? _sendMessage : null,
-                            ),
-                        ],
-                      ),
+                        Material(
+                          color: Colors.black.withValues(alpha: 0.55),
+                          borderRadius: BorderRadius.circular(10),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _inputController,
+                                  enabled: _chatsLoaded &&
+                                      _state == AppState.waiting &&
+                                      incompatibility == null,
+                                  style: const TextStyle(fontSize: 13),
+                                  onSubmitted: (_) => _sendMessage(),
+                                  decoration: InputDecoration(
+                                    hintText: _state == AppState.waiting
+                                        ? 'Prompt…'
+                                        : _state.label,
+                                    hintStyle: const TextStyle(fontSize: 13),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 10,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              if (_state != AppState.waiting)
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.stop_circle_outlined,
+                                      size: 20),
+                                  tooltip: 'Stop',
+                                  color: Colors.redAccent,
+                                  onPressed:
+                                      _activeRuntime?.stopRequested == true
+                                          ? null
+                                          : _stopResponse,
+                                )
+                              else
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon:
+                                      const Icon(Icons.send_rounded, size: 20),
+                                  onPressed: incompatibility == null
+                                      ? _sendMessage
+                                      : null,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             ),
           ),
         ],
