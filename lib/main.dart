@@ -7,9 +7,12 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'chat_store.dart';
 import 'settings_dialog.dart';
 import 'settings_store.dart';
 import 'window_setup.dart';
+
+part 'chat_requests.dart';
 
 final SettingsStore appSettings = SettingsStore();
 
@@ -87,10 +90,14 @@ Future<void> main() async {
 
 class LMStudioApp extends StatelessWidget {
   const LMStudioApp(
-      {super.key, required this.store, required this.settingsReady});
+      {super.key,
+      required this.store,
+      required this.settingsReady,
+      this.chatRepository});
 
   final SettingsStore store;
   final Future<void> settingsReady;
+  final ChatRepository? chatRepository;
 
   @override
   Widget build(BuildContext context) {
@@ -105,39 +112,75 @@ class LMStudioApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: ChatPage(store: store, settingsReady: settingsReady),
+      home: ChatPage(
+        store: store,
+        settingsReady: settingsReady,
+        chatRepository: chatRepository,
+      ),
     );
   }
 }
 
 class ChatPage extends StatefulWidget {
-  const ChatPage({super.key, required this.store, required this.settingsReady});
+  const ChatPage({
+    super.key,
+    required this.store,
+    required this.settingsReady,
+    this.chatRepository,
+  });
 
   final SettingsStore store;
   final Future<void> settingsReady;
+  final ChatRepository? chatRepository;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
 
+class _ChatRuntime {
+  AppState state = AppState.waiting;
+  bool stopRequested = false;
+  bool fileOutputMode = false;
+  ValueNotifier<String>? replyNotifier;
+  Timer? julesPollTimer;
+  final Set<http.Client> clients = {};
+
+  bool get isBusy => state != AppState.waiting;
+
+  void requestStop() {
+    stopRequested = true;
+    if (julesPollTimer != null) {
+      julesPollTimer?.cancel();
+      julesPollTimer = null;
+      state = AppState.waiting;
+    }
+  }
+
+  void cancel() {
+    stopRequested = true;
+    julesPollTimer?.cancel();
+    julesPollTimer = null;
+    for (final client in clients.toList()) {
+      client.close();
+    }
+    clients.clear();
+    state = AppState.waiting;
+  }
+}
+
 class _ChatPageState extends State<ChatPage> {
   SettingsStore get _settings => widget.store;
-  AppState _state = AppState.waiting;
   bool _agentMode = false;
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  final List<Map<String, dynamic>> _messages = [];
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  late final ChatRepository _chatRepository;
+  final List<ChatConversation> _chats = [];
+  final Map<String, _ChatRuntime> _chatRuntimes = {};
+  String? _activeChatId;
+  bool _chatsLoaded = false;
   String? _gifPath;
-  ValueNotifier<String>? _currentReplyNotifier;
-  bool _stopRequested = false;
   bool _expandedChat = false;
-  String? _lastGeminiInteractionId;
-  String? _lastOpenAiResponseId;
-  String? _lastGroqResponseId;
-
-  String? _activeJulesSessionId;
-  Timer? _julesPollTimer;
-  final Set<String> _processedJulesActivities = {};
 
   static const String _agentModeInstruction =
       'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.';
@@ -145,12 +188,56 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
-    if (_settings.isLoaded) {
-      _gifPath = _settings.getCachedGifPath(_state);
+    _chatRepository = widget.chatRepository ?? ChatRepository();
+    widget.settingsReady.then((_) => _loadChats());
+  }
+
+  ChatConversation? get _activeChat {
+    final id = _activeChatId;
+    if (id == null) return null;
+    for (final chat in _chats) {
+      if (chat.id == id) return chat;
     }
-    widget.settingsReady.then((_) {
-      if (mounted) _refreshGif();
+    return null;
+  }
+
+  _ChatRuntime? get _activeRuntime {
+    final chat = _activeChat;
+    return chat == null ? null : _runtimeFor(chat);
+  }
+
+  AppState get _state => _activeRuntime?.state ?? AppState.waiting;
+  List<ChatMessage> get _messages => _activeChat?.messages ?? const [];
+
+  _ChatRuntime _runtimeFor(ChatConversation chat) =>
+      _chatRuntimes.putIfAbsent(chat.id, _ChatRuntime.new);
+
+  void _notifyState([VoidCallback? mutation]) {
+    if (!mounted) return;
+    setState(mutation ?? () {});
+  }
+
+  Future<void> _loadChats() async {
+    final loaded = await _chatRepository.loadAll();
+    if (!mounted) return;
+    if (loaded.isEmpty) {
+      loaded.add(ChatConversation.create(_settings.provider));
+      await _chatRepository.save(loaded.first);
+    }
+    setState(() {
+      _chats
+        ..clear()
+        ..addAll(loaded);
+      _activeChatId = _chats.first.id;
+      _chatsLoaded = true;
     });
+    _refreshGif();
+    for (final chat in _chats) {
+      if (chat.kind == ChatKind.jules && chat.julesSessionId != null) {
+        _startJulesPolling(chat, _runtimeFor(chat), chat.julesSessionId!,
+            _settings.julesApiKey);
+      }
+    }
   }
 
   void _refreshGif() {
@@ -161,15 +248,19 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
-    _stopRequested = true;
-    _julesPollTimer?.cancel();
+    for (final runtime in _chatRuntimes.values) {
+      runtime.cancel();
+    }
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   void _stopResponse() {
-    setState(() => _stopRequested = true);
+    final runtime = _activeRuntime;
+    if (runtime == null) return;
+    setState(runtime.requestStop);
+    _refreshGif();
   }
 
   void _scrollToEnd({bool force = false}) {
@@ -187,927 +278,6 @@ class _ChatPageState extends State<ChatPage> {
         curve: Curves.easeOut,
       );
     });
-  }
-
-  Future<void> _saveFile(String filename, String content) async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final outputsDir = Directory(p.join(directory.path, 'Gif_Coder_Outputs'));
-      if (!await outputsDir.exists()) {
-        await outputsDir.create(recursive: true);
-      }
-      final safeFilename = p.basename(filename);
-      final file = File(p.join(outputsDir.path, safeFilename));
-      await file.writeAsString(content);
-      final savedPath =
-          p.join('Documents', 'Gif_Coder_Outputs', p.basename(file.path));
-      _addSystemMessage('Saved to $savedPath');
-    } catch (e) {
-      _addSystemMessage('Save failed ($filename): $e');
-    }
-  }
-
-  void _addSystemMessage(String msg) {
-    setState(() => _messages.add({'role': 'system', 'content': '> $msg'}));
-    _scrollToEnd(force: true);
-  }
-
-  Future<void> _handleAgentFileOutput(String reply) async {
-    if (!_agentMode || _stopRequested) return;
-
-    final regExp = RegExp(r'\[FILE:\s*(.*?)\s*\]([\s\S]*?)\[\/FILE\]');
-    final matches = regExp.allMatches(reply);
-    if (matches.isEmpty) return;
-
-    setState(() {
-      _state = AppState.working;
-      _gifPath = _settings.getCachedGifPath(_state);
-    });
-    for (final match in matches) {
-      await _saveFile(match.group(1)!.trim(), match.group(2)!.trim());
-      await Future.delayed(const Duration(milliseconds: 2100));
-    }
-  }
-
-  Future<void> _sendMessage() async {
-    final prompt = _inputController.text.trim();
-    if (prompt.isEmpty || _state != AppState.waiting) return;
-    _stopRequested = false;
-
-    if (_settings.provider == AiProvider.jules) {
-      await _sendJulesMessage(prompt);
-      return;
-    }
-
-    final transcript = buildChatTranscript(_messages, nextUserPrompt: prompt);
-
-    setState(() {
-      _messages.add({'role': 'user', 'content': prompt});
-      _state = AppState.thinking;
-      _gifPath = _settings.getCachedGifPath(_state);
-    });
-    _inputController.clear();
-    _scrollToEnd(force: true);
-
-    if (_settings.provider == AiProvider.gemini) {
-      await _sendGeminiInteraction(prompt);
-      return;
-    }
-    if (_settings.provider == AiProvider.openAi ||
-        _settings.provider == AiProvider.groq) {
-      await _sendResponsesMessage(prompt);
-      return;
-    }
-    if (_settings.provider == AiProvider.claude) {
-      await _sendClaudeMessage(transcript);
-      return;
-    }
-
-    final client = http.Client();
-    try {
-      final List<Map<String, String>> messages = [
-        if (_agentMode)
-          {
-            'role': 'system',
-            'content': _agentModeInstruction,
-          },
-        ...transcript,
-      ];
-
-      final request =
-          http.Request('POST', Uri.parse(_settings.chatCompletionsUrl));
-      request.headers['Content-Type'] = 'application/json';
-      if (_settings.apiKey.isNotEmpty) {
-        request.headers['Authorization'] = 'Bearer ${_settings.apiKey}';
-      }
-      if (_settings.provider == AiProvider.openRouter) {
-        request.headers['HTTP-Referer'] =
-            'https://github.com/alfuentes123/AI-Gif-Coder';
-        request.headers['X-Title'] = 'AI Gif Coder';
-      }
-      request.body = jsonEncode({
-        'model': _settings.modelName,
-        'messages': messages,
-        'stream': true,
-      });
-
-      final response = await client.send(request);
-
-      if (response.statusCode == 200) {
-        _currentReplyNotifier = ValueNotifier<String>('');
-
-        setState(() {
-          _messages.add({
-            'role': 'assistant',
-            'content': '',
-            'notifier': _currentReplyNotifier
-          });
-          _state = AppState.thinking;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-
-        String reply = '';
-        Timer? typingTimer;
-
-        void updateTypingState() {
-          if (!mounted) return;
-          if (_state != AppState.replying) {
-            setState(() {
-              _state = AppState.replying;
-              _gifPath = _settings.getCachedGifPath(_state);
-            });
-          }
-          typingTimer?.cancel();
-          typingTimer = Timer(const Duration(milliseconds: 1200), () {
-            if (mounted && _state == AppState.replying) {
-              setState(() {
-                _state = AppState.thinking;
-                _gifPath = _settings.getCachedGifPath(_state);
-              });
-            }
-          });
-        }
-
-        await for (final line in response.stream
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())) {
-          if (_stopRequested) break;
-          if (line.startsWith('data: ') && line.trim() != 'data: [DONE]') {
-            final dataStr = line.substring(6);
-            try {
-              final data = jsonDecode(dataStr);
-              final choices = data['choices'] as List;
-              if (choices.isNotEmpty) {
-                final delta = choices[0]['delta'];
-                if (delta != null && delta['content'] != null) {
-                  reply += delta['content'];
-                  final filtered = _filterThoughts(reply);
-                  _currentReplyNotifier?.value = filtered;
-                  _scrollToEnd();
-                  if (filtered.isNotEmpty) {
-                    updateTypingState();
-                  }
-                }
-              }
-            } catch (_) {}
-          }
-        }
-
-        typingTimer?.cancel();
-
-        if (mounted) {
-          setState(() {
-            _messages.last['content'] = _filterThoughts(reply);
-            _messages.last.remove('notifier');
-          });
-        }
-        _currentReplyNotifier?.dispose();
-        _currentReplyNotifier = null;
-
-        await _handleAgentFileOutput(reply);
-      } else {
-        final errBody = await response.stream.bytesToString();
-        try {
-          final errJson = jsonDecode(errBody);
-          final errMsg = errJson['error']?['message'] ?? errBody;
-          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
-        } catch (_) {
-          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
-        }
-      }
-    } catch (e) {
-      _addSystemMessage('Connection error: $e');
-    } finally {
-      client.close();
-      if (mounted) {
-        setState(() {
-          _state = AppState.waiting;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-    }
-  }
-
-  String? get _lastResponsesApiId {
-    return switch (_settings.provider) {
-      AiProvider.openAi => _lastOpenAiResponseId,
-      AiProvider.groq => _lastGroqResponseId,
-      _ => null,
-    };
-  }
-
-  set _lastResponsesApiId(String? value) {
-    switch (_settings.provider) {
-      case AiProvider.openAi:
-        _lastOpenAiResponseId = value;
-        break;
-      case AiProvider.groq:
-        _lastGroqResponseId = value;
-        break;
-      case AiProvider.lmStudio:
-      case AiProvider.gemini:
-      case AiProvider.openRouter:
-      case AiProvider.jules:
-      case AiProvider.claude:
-      case AiProvider.deepSeek:
-        break;
-    }
-  }
-
-  Future<void> _sendResponsesMessage(String prompt) async {
-    final client = http.Client();
-    try {
-      final body = <String, dynamic>{
-        'model': _settings.modelName,
-        'input': prompt,
-        'stream': true,
-      };
-      final previousResponseId = _lastResponsesApiId;
-      if (previousResponseId != null) {
-        body['previous_response_id'] = previousResponseId;
-      }
-      if (_agentMode) {
-        body['instructions'] = _agentModeInstruction;
-      }
-
-      final request = http.Request('POST', Uri.parse(_settings.responsesUrl));
-      request.headers.addAll({
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ${_settings.apiKey}',
-      });
-      request.body = jsonEncode(body);
-
-      final response = await client.send(request);
-      if (response.statusCode != 200) {
-        final errBody = await response.stream.bytesToString();
-        try {
-          final errJson = jsonDecode(errBody);
-          final errMsg = errJson['error']?['message'] ?? errBody;
-          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
-        } catch (_) {
-          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
-        }
-        return;
-      }
-
-      _currentReplyNotifier = ValueNotifier<String>('');
-      setState(() {
-        _messages.add({
-          'role': 'assistant',
-          'content': '',
-          'notifier': _currentReplyNotifier,
-        });
-        _state = AppState.thinking;
-        _gifPath = _settings.getCachedGifPath(_state);
-      });
-
-      String reply = '';
-      String? createdResponseId;
-      String? currentSseEvent;
-      Timer? typingTimer;
-
-      void updateTypingState() {
-        if (!mounted) return;
-        if (_state != AppState.replying) {
-          setState(() {
-            _state = AppState.replying;
-            _gifPath = _settings.getCachedGifPath(_state);
-          });
-        }
-        typingTimer?.cancel();
-        typingTimer = Timer(const Duration(milliseconds: 1200), () {
-          if (mounted && _state == AppState.replying) {
-            setState(() {
-              _state = AppState.thinking;
-              _gifPath = _settings.getCachedGifPath(_state);
-            });
-          }
-        });
-      }
-
-      await for (final line in response.stream
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
-        if (_stopRequested) break;
-        if (line.startsWith('event: ')) {
-          currentSseEvent = line.substring(7).trim();
-          continue;
-        }
-        if (!line.startsWith('data: ') || line.trim() == 'data: [DONE]') {
-          continue;
-        }
-
-        final dataStr = line.substring(6);
-        try {
-          final decoded = jsonDecode(dataStr);
-          if (decoded is! Map<String, dynamic>) continue;
-          final eventType = decoded['type'] ?? currentSseEvent;
-          if (eventType == 'response.created') {
-            createdResponseId = decoded['response']?['id'] as String?;
-          } else if (eventType == 'response.output_text.delta') {
-            final delta = decoded['delta'];
-            if (delta is String) {
-              reply += delta;
-              final filtered = _filterThoughts(reply);
-              _currentReplyNotifier?.value = filtered;
-              _scrollToEnd();
-              if (filtered.isNotEmpty) {
-                updateTypingState();
-              }
-            }
-          } else if (eventType == 'response.completed') {
-            final completedId =
-                decoded['response']?['id'] as String? ?? createdResponseId;
-            if (!_stopRequested && completedId != null) {
-              _lastResponsesApiId = completedId;
-            }
-          } else if (eventType == 'error') {
-            final errorMessage =
-                decoded['error']?['message'] as String? ?? 'Unknown API error';
-            _addSystemMessage('API error: $errorMessage');
-          }
-        } catch (_) {}
-      }
-
-      typingTimer?.cancel();
-
-      if (mounted) {
-        setState(() {
-          _messages.last['content'] = _filterThoughts(reply);
-          _messages.last.remove('notifier');
-        });
-      }
-      _currentReplyNotifier?.dispose();
-      _currentReplyNotifier = null;
-
-      await _handleAgentFileOutput(reply);
-    } catch (e) {
-      _addSystemMessage('Connection error: $e');
-    } finally {
-      client.close();
-      if (mounted) {
-        setState(() {
-          _state = AppState.waiting;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-    }
-  }
-
-  Future<void> _sendClaudeMessage(List<Map<String, String>> transcript) async {
-    final client = http.Client();
-    try {
-      final body = <String, dynamic>{
-        'model': _settings.modelName,
-        'max_tokens': 4096,
-        'messages': transcript,
-        'stream': true,
-      };
-      if (_agentMode) {
-        body['system'] = _agentModeInstruction;
-      }
-
-      final request =
-          http.Request('POST', Uri.parse(_settings.chatCompletionsUrl));
-      request.headers.addAll({
-        'Content-Type': 'application/json',
-        'x-api-key': _settings.claudeApiKey,
-        'anthropic-version': '2023-06-01',
-      });
-      request.body = jsonEncode(body);
-
-      final response = await client.send(request);
-      if (response.statusCode != 200) {
-        final errBody = await response.stream.bytesToString();
-        try {
-          final errJson = jsonDecode(errBody);
-          final errMsg = errJson['error']?['message'] ?? errBody;
-          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
-        } catch (_) {
-          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
-        }
-        return;
-      }
-
-      _currentReplyNotifier = ValueNotifier<String>('');
-      setState(() {
-        _messages.add({
-          'role': 'assistant',
-          'content': '',
-          'notifier': _currentReplyNotifier,
-        });
-        _state = AppState.thinking;
-        _gifPath = _settings.getCachedGifPath(_state);
-      });
-
-      String reply = '';
-      Timer? typingTimer;
-
-      void updateTypingState() {
-        if (!mounted) return;
-        if (_state != AppState.replying) {
-          setState(() {
-            _state = AppState.replying;
-            _gifPath = _settings.getCachedGifPath(_state);
-          });
-        }
-        typingTimer?.cancel();
-        typingTimer = Timer(const Duration(milliseconds: 1200), () {
-          if (mounted && _state == AppState.replying) {
-            setState(() {
-              _state = AppState.thinking;
-              _gifPath = _settings.getCachedGifPath(_state);
-            });
-          }
-        });
-      }
-
-      await for (final line in response.stream
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
-        if (_stopRequested) break;
-        if (!line.startsWith('data: ')) continue;
-
-        final dataStr = line.substring(6);
-        try {
-          final decoded = jsonDecode(dataStr);
-          if (decoded is! Map<String, dynamic>) continue;
-          final type = decoded['type'];
-          if (type == 'content_block_delta') {
-            final delta = decoded['delta'];
-            final text = delta is Map ? delta['text'] : null;
-            if (text is String) {
-              reply += text;
-              final filtered = _filterThoughts(reply);
-              _currentReplyNotifier?.value = filtered;
-              _scrollToEnd();
-              if (filtered.isNotEmpty) {
-                updateTypingState();
-              }
-            }
-          } else if (type == 'error') {
-            final errorMessage = decoded['error']?['message'] as String? ??
-                'Unknown Claude error';
-            _addSystemMessage('Claude error: $errorMessage');
-          }
-        } catch (_) {}
-      }
-
-      typingTimer?.cancel();
-
-      if (mounted) {
-        setState(() {
-          _messages.last['content'] = _filterThoughts(reply);
-          _messages.last.remove('notifier');
-        });
-      }
-      _currentReplyNotifier?.dispose();
-      _currentReplyNotifier = null;
-
-      await _handleAgentFileOutput(reply);
-    } catch (e) {
-      _addSystemMessage('Connection error: $e');
-    } finally {
-      client.close();
-      if (mounted) {
-        setState(() {
-          _state = AppState.waiting;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-    }
-  }
-
-  Future<void> _sendGeminiInteraction(String prompt) async {
-    final client = http.Client();
-    try {
-      final body = <String, dynamic>{
-        'model': _settings.modelName,
-        'input': prompt,
-        'stream': true,
-      };
-      if (_lastGeminiInteractionId != null) {
-        body['previous_interaction_id'] = _lastGeminiInteractionId;
-      }
-      if (_agentMode) {
-        body['system_instruction'] = _agentModeInstruction;
-      }
-
-      final request = http.Request(
-        'POST',
-        Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/interactions'),
-      );
-      request.headers.addAll({
-        'Content-Type': 'application/json',
-        'x-goog-api-key': _settings.geminiApiKey,
-        'Api-Revision': '2026-05-20',
-      });
-      request.body = jsonEncode(body);
-
-      final response = await client.send(request);
-      if (response.statusCode != 200) {
-        final errBody = await response.stream.bytesToString();
-        try {
-          final errJson = jsonDecode(errBody);
-          final errMsg = errJson['error']?['message'] ?? errBody;
-          _addSystemMessage('Server error: ${response.statusCode} - $errMsg');
-        } catch (_) {
-          _addSystemMessage('Server error: ${response.statusCode} - $errBody');
-        }
-        return;
-      }
-
-      _currentReplyNotifier = ValueNotifier<String>('');
-      setState(() {
-        _messages.add({
-          'role': 'assistant',
-          'content': '',
-          'notifier': _currentReplyNotifier,
-        });
-        _state = AppState.thinking;
-        _gifPath = _settings.getCachedGifPath(_state);
-      });
-
-      String reply = '';
-      String? createdInteractionId;
-      String? currentSseEvent;
-      Timer? typingTimer;
-
-      void updateTypingState() {
-        if (!mounted) return;
-        if (_state != AppState.replying) {
-          setState(() {
-            _state = AppState.replying;
-            _gifPath = _settings.getCachedGifPath(_state);
-          });
-        }
-        typingTimer?.cancel();
-        typingTimer = Timer(const Duration(milliseconds: 1200), () {
-          if (mounted && _state == AppState.replying) {
-            setState(() {
-              _state = AppState.thinking;
-              _gifPath = _settings.getCachedGifPath(_state);
-            });
-          }
-        });
-      }
-
-      await for (final line in response.stream
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
-        if (_stopRequested) break;
-        if (line.startsWith('event: ')) {
-          currentSseEvent = line.substring(7).trim();
-          continue;
-        }
-        if (!line.startsWith('data: ') || line.trim() == 'data: [DONE]') {
-          continue;
-        }
-
-        final dataStr = line.substring(6);
-        try {
-          final decoded = jsonDecode(dataStr);
-          if (decoded is! Map<String, dynamic>) continue;
-          final data = decoded;
-          final eventType =
-              data['event_type'] ?? data['type'] ?? currentSseEvent;
-          if (eventType == 'interaction.created') {
-            createdInteractionId = data['interaction']?['id'] as String?;
-          } else if (eventType == 'step.delta' ||
-              eventType == 'response.output_text.delta' ||
-              eventType == 'content.delta' ||
-              eventType == 'message.delta') {
-            final text = geminiInteractionTextDelta(data);
-            if (text != null) {
-              reply += text;
-              final filtered = _filterThoughts(reply);
-              _currentReplyNotifier?.value = filtered;
-              _scrollToEnd();
-              if (filtered.isNotEmpty) {
-                updateTypingState();
-              }
-            }
-          } else if (eventType == 'interaction.completed') {
-            final completedId =
-                data['interaction']?['id'] as String? ?? createdInteractionId;
-            if (!_stopRequested && completedId != null) {
-              _lastGeminiInteractionId = completedId;
-            }
-          } else if (eventType == 'error') {
-            final errorMessage =
-                data['error']?['message'] as String? ?? 'Unknown Gemini error';
-            _addSystemMessage('Gemini error: $errorMessage');
-          }
-        } catch (_) {}
-      }
-
-      typingTimer?.cancel();
-
-      if (mounted) {
-        setState(() {
-          _messages.last['content'] = _filterThoughts(reply);
-          _messages.last.remove('notifier');
-        });
-      }
-      _currentReplyNotifier?.dispose();
-      _currentReplyNotifier = null;
-
-      await _handleAgentFileOutput(reply);
-    } catch (e) {
-      _addSystemMessage('Connection error: $e');
-    } finally {
-      client.close();
-      if (mounted) {
-        setState(() {
-          _state = AppState.waiting;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-    }
-  }
-
-  Future<void> _sendJulesMessage(String prompt) async {
-    _stopRequested = false;
-
-    final apiKey = _settings.julesApiKey;
-    final repo = _settings.julesRepo;
-    final branch = _settings.julesBranch;
-
-    if (apiKey.isEmpty || repo == null || branch == null) {
-      _addSystemMessage(
-          'Please configure Jules API key, GitHub repository, and branch in Settings first.');
-      setState(() {
-        _state = AppState.waiting;
-        _gifPath = _settings.getCachedGifPath(_state);
-      });
-      return;
-    }
-
-    setState(() {
-      _messages.add({'role': 'user', 'content': prompt});
-      _state = AppState.thinking;
-      _gifPath = _settings.getCachedGifPath(_state);
-    });
-    _inputController.clear();
-    _scrollToEnd(force: true);
-
-    final client = http.Client();
-    try {
-      String sessionId;
-      if (_activeJulesSessionId == null) {
-        _addSystemMessage('Creating new Jules session...');
-        final response = await client.post(
-          Uri.parse('https://jules.googleapis.com/v1alpha/sessions'),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-          },
-          body: jsonEncode({
-            'prompt': prompt,
-            'sourceContext': {
-              'source': repo,
-              'githubRepoContext': {
-                'startingBranch': branch,
-              },
-            },
-            'automationMode': 'AUTO_CREATE_PR',
-            'title': 'Gif Coder Task',
-          }),
-        );
-
-        if (response.statusCode != 200) {
-          throw Exception(
-              'Failed to create session: ${response.statusCode} - ${response.body}');
-        }
-
-        final data = jsonDecode(response.body);
-        sessionId = data['name'] as String;
-        setState(() {
-          _activeJulesSessionId = sessionId;
-          _processedJulesActivities.clear();
-        });
-        _addSystemMessage('Session created: $sessionId');
-      } else {
-        sessionId = _activeJulesSessionId!;
-        _addSystemMessage('Sending message to active session...');
-
-        final response = await client.post(
-          Uri.parse(
-              'https://jules.googleapis.com/v1alpha/$sessionId:sendMessage'),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-          },
-          body: jsonEncode({
-            'prompt': prompt,
-          }),
-        );
-
-        if (response.statusCode != 200) {
-          _addSystemMessage(
-              'Session might be completed. Creating a new session instead...');
-          _activeJulesSessionId = null;
-          await _sendJulesMessage(prompt);
-          return;
-        }
-      }
-
-      _startJulesPolling(sessionId, apiKey);
-    } catch (e) {
-      _addSystemMessage('Jules error: $e');
-      setState(() {
-        _state = AppState.waiting;
-        _gifPath = _settings.getCachedGifPath(_state);
-      });
-    } finally {
-      client.close();
-    }
-  }
-
-  void _startJulesPolling(String sessionId, String apiKey) {
-    _julesPollTimer?.cancel();
-
-    _pollJulesStatus(sessionId, apiKey);
-
-    _julesPollTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      if (!mounted || _stopRequested) {
-        timer.cancel();
-        if (mounted) {
-          setState(() {
-            _state = AppState.waiting;
-            _gifPath = _settings.getCachedGifPath(_state);
-          });
-        }
-        return;
-      }
-      _pollJulesStatus(sessionId, apiKey);
-    });
-  }
-
-  Future<void> _pollJulesStatus(String sessionId, String apiKey) async {
-    final client = http.Client();
-    try {
-      final sessionUrl = 'https://jules.googleapis.com/v1alpha/$sessionId';
-      final sessionResponse = await client.get(
-        Uri.parse(sessionUrl),
-        headers: {'X-Goog-Api-Key': apiKey},
-      );
-
-      if (!mounted) return;
-
-      String sessionStateStr = 'QUEUED';
-      if (sessionResponse.statusCode == 200) {
-        final sessionData = jsonDecode(sessionResponse.body);
-        sessionStateStr = (sessionData['state'] ?? 'QUEUED') as String;
-      }
-
-      AppState nextState = AppState.thinking;
-      if (sessionStateStr == 'IN_PROGRESS') {
-        nextState = AppState.working;
-      } else if (sessionStateStr == 'COMPLETED' ||
-          sessionStateStr == 'FAILED' ||
-          sessionStateStr == 'PAUSED') {
-        nextState = AppState.waiting;
-      } else if (sessionStateStr == 'AWAITING_PLAN_APPROVAL' ||
-          sessionStateStr == 'AWAITING_USER_FEEDBACK') {
-        nextState = AppState.replying;
-      }
-
-      if (_state != nextState) {
-        setState(() {
-          _state = nextState;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-
-      final activitiesUrl =
-          'https://jules.googleapis.com/v1alpha/$sessionId/activities';
-      final activitiesResponse = await client.get(
-        Uri.parse(activitiesUrl),
-        headers: {'X-Goog-Api-Key': apiKey},
-      );
-
-      if (!mounted) return;
-
-      if (activitiesResponse.statusCode == 200) {
-        final data = jsonDecode(activitiesResponse.body);
-        final List<dynamic>? activities = data['activities'];
-        if (activities != null && activities.isNotEmpty) {
-          final sortedActivities = List.from(activities);
-          sortedActivities.sort((a, b) {
-            final aTime = a['createTime'] != null
-                ? DateTime.parse(a['createTime'] as String)
-                : DateTime.fromMillisecondsSinceEpoch(0);
-            final bTime = b['createTime'] != null
-                ? DateTime.parse(b['createTime'] as String)
-                : DateTime.fromMillisecondsSinceEpoch(0);
-            return aTime.compareTo(bTime);
-          });
-
-          for (final activity in sortedActivities) {
-            final actName = activity['name'] as String?;
-            if (actName == null ||
-                _processedJulesActivities.contains(actName)) {
-              continue;
-            }
-            _processedJulesActivities.add(actName);
-
-            if (activity['agentMessaged'] != null) {
-              final agentMsg =
-                  activity['agentMessaged']['agentMessage'] as String?;
-              if (agentMsg != null && agentMsg.trim().isNotEmpty) {
-                setState(() {
-                  _messages.add({
-                    'role': 'assistant',
-                    'content': _filterThoughts(agentMsg),
-                  });
-                });
-                _scrollToEnd();
-              }
-            } else if (activity['planGenerated'] != null) {
-              final plan = activity['planGenerated']['plan'];
-              final steps =
-                  plan != null ? plan['steps'] as List<dynamic>? : null;
-              String planText = 'Plan Generated:\n';
-              if (steps != null) {
-                for (var i = 0; i < steps.length; i++) {
-                  final step = steps[i];
-                  final desc = step['description'] ?? 'Step ${i + 1}';
-                  planText += '- $desc\n';
-                }
-              } else {
-                planText += 'No plan steps detailed.';
-              }
-
-              _addSystemMessage(planText);
-
-              if (sessionStateStr == 'AWAITING_PLAN_APPROVAL') {
-                _addPlanApprovalPrompt(sessionId, apiKey);
-              }
-            } else if (activity['progressUpdated'] != null) {
-              final title = activity['progressUpdated']['title'] ?? '';
-              final desc = activity['progressUpdated']['description'] ?? '';
-              if (title.isNotEmpty || desc.isNotEmpty) {
-                _addSystemMessage('Progress: $title - $desc');
-              }
-            } else if (activity['sessionCompleted'] != null) {
-              _addSystemMessage('Jules task completed successfully!');
-            } else if (activity['sessionFailed'] != null) {
-              _addSystemMessage('Jules task failed.');
-            }
-          }
-        }
-      }
-
-      if (sessionStateStr == 'COMPLETED' || sessionStateStr == 'FAILED') {
-        _julesPollTimer?.cancel();
-        _julesPollTimer = null;
-        _activeJulesSessionId = null;
-        setState(() {
-          _state = AppState.waiting;
-          _gifPath = _settings.getCachedGifPath(_state);
-        });
-      }
-    } catch (e) {
-      debugPrint('Error polling Jules: $e');
-    } finally {
-      client.close();
-    }
-  }
-
-  void _addPlanApprovalPrompt(String sessionId, String apiKey) {
-    setState(() {
-      _messages.add({
-        'role': 'system_action',
-        'content': 'Jules is waiting for plan approval.',
-        'actionLabel': 'Approve Plan',
-        'onAction': () async {
-          _addSystemMessage('Approving plan...');
-          try {
-            final response = await http.post(
-              Uri.parse(
-                  'https://jules.googleapis.com/v1alpha/$sessionId:approvePlan'),
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Key': apiKey,
-              },
-              body: jsonEncode({}),
-            );
-            if (response.statusCode == 200) {
-              _addSystemMessage('Plan approved successfully.');
-              _pollJulesStatus(sessionId, apiKey);
-            } else {
-              _addSystemMessage(
-                  'Failed to approve plan: ${response.statusCode} - ${response.body}');
-            }
-          } catch (e) {
-            _addSystemMessage('Error approving plan: $e');
-          }
-        }
-      });
-    });
-    _scrollToEnd(force: true);
   }
 
   String _filterThoughts(String text) {
@@ -1266,20 +436,191 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _openSettings() async {
-    final previousProvider = _settings.provider;
     final saved = await showDialog<bool>(
       context: context,
       builder: (_) => SettingsDialog(store: _settings),
     );
     if (saved == true && mounted) {
-      if (_settings.provider != previousProvider) {
-        _lastGeminiInteractionId = null;
-        _lastOpenAiResponseId = null;
-        _lastGroqResponseId = null;
-      }
       setState(() {});
       _refreshGif();
     }
+  }
+
+  Future<void> _newChat() async {
+    if (_activeChat?.canonicalMessageCount == 0) {
+      if (mounted && (_scaffoldKey.currentState?.isDrawerOpen ?? false)) {
+        Navigator.of(context).pop();
+      }
+      return;
+    }
+    final chat = ChatConversation.create(_settings.provider);
+    setState(() {
+      _chats.insert(0, chat);
+      _activeChatId = chat.id;
+      _inputController.clear();
+      _gifPath = _settings.getCachedGifPath(AppState.waiting);
+    });
+    await _chatRepository.save(chat);
+    if (mounted && (_scaffoldKey.currentState?.isDrawerOpen ?? false)) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  void _selectChat(ChatConversation chat) {
+    setState(() {
+      _activeChatId = chat.id;
+      _inputController.clear();
+      _gifPath = _settings.getCachedGifPath(_runtimeFor(chat).state);
+    });
+    Navigator.of(context).pop();
+    _scrollToEnd(force: true);
+  }
+
+  Future<void> _renameChat(ChatConversation chat) async {
+    var draftTitle = chat.title;
+    final title = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename chat'),
+        content: TextFormField(
+          initialValue: chat.title,
+          autofocus: true,
+          maxLength: 80,
+          onChanged: (value) => draftTitle = value,
+          onFieldSubmitted: (value) => Navigator.pop(dialogContext, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, draftTitle),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    if (title == null || title.trim().isEmpty) return;
+    setState(() {
+      chat.title = title.trim();
+      chat.updatedAt = DateTime.now().toUtc();
+    });
+    await _chatRepository.save(chat);
+  }
+
+  Future<void> _deleteChat(ChatConversation chat) async {
+    final runtime = _runtimeFor(chat);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete chat?'),
+        content: Text(runtime.isBusy
+            ? 'This chat is still working. Deleting it will stop the active request.'
+            : 'This permanently removes “${chat.title}” from this device.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    runtime.cancel();
+    _chatRuntimes.remove(chat.id);
+    _chats.remove(chat);
+    await _chatRepository.delete(chat.id);
+    if (_chats.isEmpty) {
+      final replacement = ChatConversation.create(_settings.provider);
+      _chats.add(replacement);
+      await _chatRepository.save(replacement);
+    }
+    if (_activeChatId == chat.id) _activeChatId = _chats.first.id;
+    if (mounted) {
+      setState(() {
+        _gifPath = _settings.getCachedGifPath(_state);
+      });
+    }
+  }
+
+  Widget _buildChatDrawer() {
+    final sorted = [..._chats]
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return Drawer(
+      width: 280,
+      backgroundColor: const Color(0xFF151515),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _newChat,
+                  icon: const Icon(Icons.add_comment_outlined),
+                  label: const Text('New chat'),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: sorted.length,
+                itemBuilder: (context, index) {
+                  final chat = sorted[index];
+                  final runtime = _runtimeFor(chat);
+                  final selected = chat.id == _activeChatId;
+                  return ListTile(
+                    selected: selected,
+                    selectedTileColor: Colors.white.withValues(alpha: 0.08),
+                    leading: runtime.isBusy
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.chat_bubble_outline, size: 18),
+                    title: Text(
+                      chat.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      chat.lastUsedProvider.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    onTap: () => _selectChat(chat),
+                    trailing: PopupMenuButton<String>(
+                      tooltip: 'Chat actions',
+                      onSelected: (action) {
+                        if (action == 'rename') {
+                          _renameChat(chat);
+                        } else if (action == 'delete') {
+                          _deleteChat(chat);
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'rename', child: Text('Rename')),
+                        PopupMenuItem(value: 'delete', child: Text('Delete')),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Clears the settings button and a gap above the GIF frame.
@@ -1369,7 +710,12 @@ class _ChatPageState extends State<ChatPage> {
   Widget build(BuildContext context) {
     final isJules = _settings.provider == AiProvider.jules;
     final displayAgentMode = !isJules && _agentMode;
+    final incompatibility = _activeChat == null
+        ? null
+        : _providerCompatibilityMessage(_activeChat!);
     return Scaffold(
+      key: _scaffoldKey,
+      drawer: _buildChatDrawer(),
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -1390,6 +736,17 @@ class _ChatPageState extends State<ChatPage> {
                     Colors.black.withValues(alpha: 0.92),
                   ],
                 ),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.menu_rounded, size: 22),
+                tooltip: 'Chats',
+                onPressed: () => _scaffoldKey.currentState?.openDrawer(),
               ),
             ),
           ),
@@ -1539,24 +896,19 @@ class _ChatPageState extends State<ChatPage> {
                               itemCount: _messages.length,
                               itemBuilder: (context, index) {
                                 final msg = _messages[index];
-                                final isSystem = msg['role'] == 'system';
+                                final isSystem = msg.role == 'system';
                                 final isSystemAction =
-                                    msg['role'] == 'system_action';
-                                final notifier =
-                                    msg['notifier'] as ValueNotifier<String>?;
+                                    msg.role == 'system_action';
+                                final notifier = msg.notifier;
 
                                 Widget textWidget;
                                 if (isSystemAction) {
-                                  final actionLabel =
-                                      msg['actionLabel'] as String;
-                                  final onAction =
-                                      msg['onAction'] as VoidCallback?;
                                   textWidget = Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
                                       SelectableText(
-                                        msg['content'] as String,
+                                        msg.content,
                                         style: const TextStyle(
                                           color: Colors.white70,
                                           fontSize: 11,
@@ -1566,21 +918,18 @@ class _ChatPageState extends State<ChatPage> {
                                       ),
                                       const SizedBox(height: 6),
                                       ElevatedButton(
-                                        onPressed: onAction == null
-                                            ? null
-                                            : () {
-                                                setState(() {
-                                                  msg['onAction'] =
-                                                      null; // disable
-                                                });
-                                                onAction();
-                                              },
+                                        onPressed:
+                                            msg.kind == 'jules_plan_approval'
+                                                ? () => _approveJulesPlan(
+                                                      _activeChat!,
+                                                    )
+                                                : null,
                                         style: ElevatedButton.styleFrom(
                                           padding: const EdgeInsets.symmetric(
                                               horizontal: 12, vertical: 6),
                                           visualDensity: VisualDensity.compact,
                                         ),
-                                        child: Text(actionLabel,
+                                        child: Text(msg.actionLabel ?? 'Action',
                                             style:
                                                 const TextStyle(fontSize: 11)),
                                       ),
@@ -1594,7 +943,7 @@ class _ChatPageState extends State<ChatPage> {
                                   );
                                 } else {
                                   textWidget = _buildMessageContent(
-                                      msg['content'] as String, isSystem);
+                                      msg.content, isSystem);
                                 }
 
                                 return Padding(
@@ -1617,6 +966,17 @@ class _ChatPageState extends State<ChatPage> {
                             ),
                     ),
                     const SizedBox(height: 6),
+                    if (incompatibility != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          incompatibility,
+                          style: const TextStyle(
+                            color: Colors.orangeAccent,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
                     Material(
                       color: Colors.black.withValues(alpha: 0.55),
                       borderRadius: BorderRadius.circular(10),
@@ -1625,7 +985,9 @@ class _ChatPageState extends State<ChatPage> {
                           Expanded(
                             child: TextField(
                               controller: _inputController,
-                              enabled: _state == AppState.waiting,
+                              enabled: _chatsLoaded &&
+                                  _state == AppState.waiting &&
+                                  incompatibility == null,
                               style: const TextStyle(fontSize: 13),
                               onSubmitted: (_) => _sendMessage(),
                               decoration: InputDecoration(
@@ -1649,13 +1011,16 @@ class _ChatPageState extends State<ChatPage> {
                                   size: 20),
                               tooltip: 'Stop',
                               color: Colors.redAccent,
-                              onPressed: _stopRequested ? null : _stopResponse,
+                              onPressed: _activeRuntime?.stopRequested == true
+                                  ? null
+                                  : _stopResponse,
                             )
                           else
                             IconButton(
                               visualDensity: VisualDensity.compact,
                               icon: const Icon(Icons.send_rounded, size: 20),
-                              onPressed: _sendMessage,
+                              onPressed:
+                                  incompatibility == null ? _sendMessage : null,
                             ),
                         ],
                       ),

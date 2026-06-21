@@ -37,6 +37,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late String _openAiModel;
   late String _deepSeekApiKey;
   late String _deepSeekModel;
+  String? _outputFolderPath;
   String? _julesRepo;
   String? _julesBranch;
 
@@ -71,6 +72,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _openAiModel = _store.openAiModel;
     _deepSeekApiKey = _store.deepSeekApiKey;
     _deepSeekModel = _store.deepSeekModel;
+    _outputFolderPath = _store.outputFolderPath;
     _julesRepo = _store.julesRepo;
     _julesBranch = _store.julesBranch;
 
@@ -331,6 +333,18 @@ class _SettingsDialogState extends State<SettingsDialog> {
     });
   }
 
+  Future<void> _pickOutputFolder() async {
+    final path = await FilePicker.getDirectoryPath(
+      dialogTitle: 'Select folder for generated code files',
+    );
+    if (path == null || !mounted) return;
+    setState(() => _outputFolderPath = path);
+  }
+
+  void _restoreDefaultOutputFolder() {
+    setState(() => _outputFolderPath = null);
+  }
+
   Future<void> _testConnection() async {
     setState(() {
       _testingConnection = true;
@@ -555,6 +569,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _store.deepSeekModel = _deepSeekModel;
     _store.julesRepo = _julesRepo;
     _store.julesBranch = _julesBranch;
+    _store.outputFolderPath = _outputFolderPath;
 
     await _store.save();
     if (mounted) Navigator.pop(context, true);
@@ -879,10 +894,65 @@ class _SettingsDialogState extends State<SettingsDialog> {
     );
   }
 
+  Widget _buildOutputTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: 8, left: 2, right: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Code file output',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Files returned in code file output mode will be saved directly '
+            'into this folder.',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: _pickOutputFolder,
+            icon: const Icon(Icons.folder_open, size: 18),
+            label: const Text('Choose output folder'),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withValues(alpha: 0.35),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              _outputFolderPath ?? 'Default: Documents/Gif_Coder_Outputs',
+              style: const TextStyle(fontSize: 12),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (_outputFolderPath != null) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _restoreDefaultOutputFolder,
+                icon: const Icon(Icons.restore, size: 18),
+                label: const Text('Use default folder'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: AlertDialog(
         title: const Text('Settings'),
         content: SizedBox(
@@ -893,6 +963,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
               TabBar(
                 tabs: const [
                   Tab(text: 'Connection'),
+                  Tab(text: 'Output'),
                   Tab(text: 'GIFs'),
                 ],
                 indicatorColor: Theme.of(context).colorScheme.primary,
@@ -905,6 +976,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 child: TabBarView(
                   children: [
                     _buildConnectionTab(),
+                    _buildOutputTab(),
                     _buildGifsTab(),
                   ],
                 ),

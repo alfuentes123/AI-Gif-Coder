@@ -70,6 +70,7 @@ class SettingsStore {
   String deepSeekApiKey = '';
   String deepSeekModel = 'deepseek-v4-flash';
 
+  String? outputFolderPath;
   String? gifFolderPath;
   final Map<AppState, String> gifFiles = {
     for (final s in AppState.values) s: s.defaultFileName,
@@ -263,6 +264,7 @@ class SettingsStore {
     deepSeekModel =
         prefs.getString('deep_seek_model_name') ?? 'deepseek-v4-flash';
 
+    outputFolderPath = prefs.getString('output_folder');
     gifFolderPath = prefs.getString('gif_folder');
     for (final state in AppState.values) {
       gifFiles[state] =
@@ -326,6 +328,11 @@ class SettingsStore {
     await _secureStorage.write(key: 'api_key', value: apiKey);
     await prefs.setString('model_name', modelName);
 
+    if (outputFolderPath != null && outputFolderPath!.isNotEmpty) {
+      await prefs.setString('output_folder', outputFolderPath!);
+    } else {
+      await prefs.remove('output_folder');
+    }
     if (gifFolderPath != null) {
       await prefs.setString('gif_folder', gifFolderPath!);
     } else {

@@ -43,5 +43,6 @@ flutter_launcher_icons:
     image_path: "assets/Icon/icon.png"
 
 inno_bundle:
+  name: AI Gif Coder
   id: 666c3210-5264-11f1-9111-8be523798ee2
-  publisher: MrCre
+  publisher: Alfonso Fuentes
