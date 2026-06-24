@@ -3,6 +3,51 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gif_coder/main.dart';
 import 'package:gif_coder/chat_store.dart';
 import 'package:gif_coder/settings_store.dart';
+import 'package:gif_coder/speech_input.dart';
+
+class FakeSpeechInputService extends SpeechInputService {
+  FakeSpeechInputService({this.transcript = 'recognized speech'});
+
+  final String transcript;
+  SpeechInputState _state = SpeechInputState.idle;
+  bool cancelCalled = false;
+
+  @override
+  SpeechInputState get state => _state;
+
+  void _setState(SpeechInputState value) {
+    _state = value;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> startRecording() async {
+    _setState(SpeechInputState.recording);
+  }
+
+  @override
+  Future<String> stopAndTranscribe() async {
+    _setState(SpeechInputState.transcribing);
+    await Future<void>.delayed(Duration.zero);
+    _setState(SpeechInputState.idle);
+    return transcript;
+  }
+
+  @override
+  Future<void> cancel() async {
+    cancelCalled = true;
+    _setState(SpeechInputState.idle);
+  }
+
+  @override
+  Future<void> close() async {
+    await cancel();
+    dispose();
+  }
+}
 
 void main() {
   test('buildChatTranscript keeps chat turns and appends prompt', () {
@@ -140,5 +185,72 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Renamed chat'), findsOneWidget);
+  });
+
+  test('speech transcript merging preserves existing prompt text', () {
+    expect(mergeSpeechTranscript('', ' hello world '), 'hello world');
+    expect(
+      mergeSpeechTranscript('existing prompt  ', ' recognized speech '),
+      'existing prompt recognized speech',
+    );
+    expect(mergeSpeechTranscript('existing', '   '), 'existing');
+  });
+
+  testWidgets('microphone records and inserts editable text without sending',
+      (WidgetTester tester) async {
+    final store = SettingsStore()..isLoaded = true;
+    final repository = ChatRepository.memory();
+    final speech = FakeSpeechInputService();
+
+    await tester.pumpWidget(LMStudioApp(
+      store: store,
+      settingsReady: Future.value(),
+      chatRepository: repository,
+      speechInputService: speech,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final prompt = find.byType(TextField).last;
+    await tester.enterText(prompt, 'existing prompt');
+    await tester.tap(find.byKey(const ValueKey('speech_input_button')));
+    await tester.pump();
+
+    expect(find.byTooltip('Stop listening'), findsOneWidget);
+    expect(tester.widget<TextField>(prompt).readOnly, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('speech_input_button')));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<TextField>(prompt).controller!.text,
+      'existing prompt recognized speech',
+    );
+    expect(tester.widget<TextField>(prompt).readOnly, isFalse);
+    final chats = await repository.loadAll();
+    expect(chats.single.canonicalMessageCount, 0);
+  });
+
+  testWidgets('disposing chat cancels injected speech input',
+      (WidgetTester tester) async {
+    final speech = FakeSpeechInputService();
+    final store = SettingsStore()..isLoaded = true;
+
+    await tester.pumpWidget(LMStudioApp(
+      store: store,
+      settingsReady: Future.value(),
+      chatRepository: ChatRepository.memory(),
+      speechInputService: speech,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const ValueKey('speech_input_button')));
+    await tester.pump();
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(speech.cancelCalled, isTrue);
   });
 }

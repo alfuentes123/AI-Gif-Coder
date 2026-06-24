@@ -1,7 +1,7 @@
 name: gif_coder
 description: A reactive chatbot with file output.
 publish_to: 'none'
-version: 1.0.0
+version: 1.0.1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -16,6 +16,9 @@ dependencies:
   shared_preferences: ^2.5.5
   window_manager: ^0.5.1
   flutter_secure_storage: ^10.2.0
+  flutter_recorder: ^1.1.5
+  whisper_ffi:
+    path: packages/whisper_ffi
 
 dev_dependencies:
   flutter_launcher_icons: ^0.14.4
@@ -29,6 +32,7 @@ flutter:
 
   assets:
     - assets/gifs/
+    - assets/models/ggml-tiny.bin
 
 flutter_launcher_icons:
   image_path: "assets/Icon/icon.png"
@@ -46,4 +50,4 @@ inno_bundle:
   name: AI Gif Coder
   id: 666c3210-5264-11f1-9111-8be523798ee2
   publisher: Alfonso Fuentes
-  admin: false 
+  admin: false

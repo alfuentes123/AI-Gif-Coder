@@ -15,6 +15,20 @@ Unlike traditional static chat interfaces, AI Gif Coder changes its background a
 
 ✔️ Customizable: Easily map your own GIF folders directly from the UI settings.
 
+✔️ Offline Speech Input: Record a prompt from the microphone and transcribe it
+locally with the bundled multilingual Whisper model on Windows, macOS, and
+Linux. Audio is deleted after transcription and is never uploaded.
+
+### Desktop speech requirements
+
+- Windows: a working microphone recognized by Windows.
+- macOS: grant microphone access when prompted.
+- Linux: PipeWire or PulseAudio must expose a capture device. GStreamer is
+  available by default on many distributions; install it through your package
+  manager if microphone initialization reports that it is missing.
+- Speech recordings stop automatically after 60 seconds. Transcribed text is
+  inserted into the prompt for review and is not sent automatically.
+
 🛠️ Flutter/Dart
 
 🛠️ API Compatibility: OpenAI-compatible REST API endpoints
