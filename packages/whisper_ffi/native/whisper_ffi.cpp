@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -46,7 +48,13 @@ uint32_t read_u32(std::ifstream &stream) {
 
 bool read_wav(const char *path, std::vector<float> &samples,
               std::string &error) {
-  std::ifstream stream(path, std::ios::binary);
+  std::ifstream stream;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    stream.open(path, std::ios::binary);
+    if (!stream.fail()) break;
+    stream.clear();
+    std::this_thread::sleep_for(std::chrono::milliseconds(75));
+  }
   // Validate the audio file before parsing it.
   if (stream.fail()) {
     error = "audio_open_failed";
@@ -71,7 +79,7 @@ bool read_wav(const char *path, std::vector<float> &samples,
   uint16_t channels = 0;
   uint32_t sample_rate = 0;
   uint16_t bits_per_sample = 0;
-  std::vector<int16_t> pcm;
+  std::vector<uint8_t> pcm;
 
   while (stream) {
     if (format > 0) {
@@ -95,11 +103,11 @@ bool read_wav(const char *path, std::vector<float> &samples,
       bits_per_sample = read_u16(stream);
       if (chunk_size > 16) stream.seekg(chunk_size - 16, std::ios::cur);
     } else if (is_data) {
-      if (chunk_size < 2 || chunk_size % 2 > 0) {
+      if (chunk_size < 2) {
         error = "malformed_wav";
         return false;
       }
-      pcm.resize(chunk_size / sizeof(int16_t));
+      pcm.resize(chunk_size);
       stream.read(reinterpret_cast<char *>(pcm.data()), chunk_size);
     } else {
       stream.seekg(chunk_size, std::ios::cur);
@@ -107,20 +115,45 @@ bool read_wav(const char *path, std::vector<float> &samples,
     if (chunk_size % 2 > 0) stream.seekg(1, std::ios::cur);
   }
 
-  if (format != 1 || channels != 1 || sample_rate != 16000 ||
-      bits_per_sample != 16 || pcm.empty()) {
+  if (channels != 1 || sample_rate != 16000 || pcm.empty()) {
     error = "unsupported_wav";
     return false;
   }
 
-  samples.resize(pcm.size());
-  std::transform(pcm.begin(), pcm.end(), samples.begin(), [](int16_t value) {
-    return static_cast<float>(value) / 32768.0f;
-  });
-  return true;
-}
+  if (format == 1 && bits_per_sample == 16 && pcm.size() % 2 == 0) {
+    samples.resize(pcm.size() / 2);
+    for (size_t index = 0; index < samples.size(); ++index) {
+      const uint16_t value = static_cast<uint16_t>(pcm[index * 2]) |
+                             (static_cast<uint16_t>(pcm[index * 2 + 1]) << 8);
+      samples[index] = static_cast<int16_t>(value) / 32768.0f;
+    }
+    return true;
+  }
 
+  if (format == 3 && bits_per_sample == 32 && pcm.size() % 4 == 0) {
+    samples.resize(pcm.size() / 4);
+    for (size_t index = 0; index < samples.size(); ++index) {
+      const uint32_t value = static_cast<uint32_t>(pcm[index * 4]) |
+                             (static_cast<uint32_t>(pcm[index * 4 + 1]) << 8) |
+                             (static_cast<uint32_t>(pcm[index * 4 + 2]) << 16) |
+                             (static_cast<uint32_t>(pcm[index * 4 + 3]) << 24);
+      std::memcpy(&samples[index], &value, sizeof(float));
+    }
+    return true;
+  }
+
+  error = "unsupported_wav";
+  return false;
+}
 bool should_abort(void *) { return cancelled.load(); }
+
+bool has_detectable_audio(const std::vector<float> &samples) {
+  constexpr size_t minimum_samples = 800;
+  if (samples.size() < minimum_samples) return false;
+  return std::any_of(samples.begin(), samples.end(), [](float sample) {
+    return std::isfinite(sample) && std::abs(sample) > 1.0e-6f;
+  });
+}
 
 }  // namespace
 
@@ -142,6 +175,11 @@ WHISPER_FFI_EXPORT int whisper_ffi_transcribe(
   std::string error;
   if (!read_wav(wav_path, samples, error)) {
     write_message(error_output, error_capacity, error);
+    return 2;
+  }
+  if (!has_detectable_audio(samples)) {
+    write_message(error_output, error_capacity,
+                  std::string{'n', 'o', '_', 'a', 'u', 'd', 'i', 'o'});
     return 2;
   }
 

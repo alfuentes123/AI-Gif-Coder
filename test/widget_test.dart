@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gif_coder/main.dart';
@@ -6,11 +9,18 @@ import 'package:gif_coder/settings_store.dart';
 import 'package:gif_coder/speech_input.dart';
 
 class FakeSpeechInputService extends SpeechInputService {
-  FakeSpeechInputService({this.transcript = 'recognized speech'});
+  FakeSpeechInputService(
+      {this.transcript = 'recognized speech',
+      this.startGate,
+      this.stopForSilence = false});
 
   final String transcript;
+  final Completer<void>? startGate;
+  final bool stopForSilence;
   SpeechInputState _state = SpeechInputState.idle;
   bool cancelCalled = false;
+  int startCalls = 0;
+  int stopCalls = 0;
 
   @override
   SpeechInputState get state => _state;
@@ -25,11 +35,23 @@ class FakeSpeechInputService extends SpeechInputService {
 
   @override
   Future<void> startRecording() async {
+    startCalls++;
+    await startGate?.future;
     _setState(SpeechInputState.recording);
   }
 
   @override
+  Future<bool> shouldStopForSilence({
+    Duration minimumRecordingDuration = const Duration(milliseconds: 1200),
+    Duration trailingSilenceDuration = const Duration(milliseconds: 1800),
+    double silenceThresholdDb = -45,
+  }) async {
+    return stopForSilence;
+  }
+
+  @override
   Future<String> stopAndTranscribe() async {
+    stopCalls++;
     _setState(SpeechInputState.transcribing);
     await Future<void>.delayed(Duration.zero);
     _setState(SpeechInputState.idle);
@@ -47,6 +69,36 @@ class FakeSpeechInputService extends SpeechInputService {
     await cancel();
     dispose();
   }
+}
+
+Uint8List _wavWithSamples(List<int> samples) {
+  final dataBytes = samples.length * 2;
+  final bytes = Uint8List(44 + dataBytes);
+  final view = ByteData.sublistView(bytes);
+
+  void ascii(int offset, String value) {
+    for (var index = 0; index < value.length; index++) {
+      bytes[offset + index] = value.codeUnitAt(index);
+    }
+  }
+
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + dataBytes, Endian.little);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, Endian.little);
+  view.setUint16(20, 1, Endian.little);
+  view.setUint16(22, 1, Endian.little);
+  view.setUint32(24, 16000, Endian.little);
+  view.setUint32(28, 32000, Endian.little);
+  view.setUint16(32, 2, Endian.little);
+  view.setUint16(34, 16, Endian.little);
+  ascii(36, 'data');
+  view.setUint32(40, dataBytes, Endian.little);
+  for (var index = 0; index < samples.length; index++) {
+    view.setInt16(44 + (index * 2), samples[index], Endian.little);
+  }
+  return bytes;
 }
 
 void main() {
@@ -196,6 +248,31 @@ void main() {
     expect(mergeSpeechTranscript('existing', '   '), 'existing');
   });
 
+  test('recorded WAV inspection rejects empty and silent audio', () {
+    expect(inspectRecordedWav(_wavWithSamples(List.filled(100, 0))),
+        RecordedAudioQuality.empty);
+    expect(inspectRecordedWav(_wavWithSamples(List.filled(4000, 0))),
+        RecordedAudioQuality.silent);
+    expect(
+      inspectRecordedWav(_wavWithSamples([
+        ...List.filled(4000, 0),
+        1000,
+      ])),
+      RecordedAudioQuality.usable,
+    );
+    expect(
+      recordedWavHasTrailingSilence(
+        _wavWithSamples([
+          ...List.filled(200, 1000),
+          ...List.filled(3200, 0),
+        ]),
+        minimumSamples: 3300,
+        trailingSamples: 3200,
+      ),
+      isTrue,
+    );
+  });
+
   testWidgets('microphone records and inserts editable text without sending',
       (WidgetTester tester) async {
     final store = SettingsStore()..isLoaded = true;
@@ -231,6 +308,66 @@ void main() {
     expect(tester.widget<TextField>(prompt).readOnly, isFalse);
     final chats = await repository.loadAll();
     expect(chats.single.canonicalMessageCount, 0);
+  });
+
+  testWidgets('rapid microphone taps do not start overlapping recordings',
+      (WidgetTester tester) async {
+    final startGate = Completer<void>();
+    final speech = FakeSpeechInputService(startGate: startGate);
+    final store = SettingsStore()..isLoaded = true;
+
+    await tester.pumpWidget(LMStudioApp(
+      store: store,
+      settingsReady: Future.value(),
+      chatRepository: ChatRepository.memory(),
+      speechInputService: speech,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final micButton = find.byKey(const ValueKey('speech_input_button'));
+    await tester.tap(micButton);
+    await tester.pump();
+    await tester.tap(micButton);
+    await tester.pump();
+
+    expect(speech.startCalls, 1);
+    expect(speech.stopCalls, 0);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    startGate.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byTooltip('Stop listening'), findsOneWidget);
+    expect(speech.startCalls, 1);
+  });
+
+  testWidgets('recording stops automatically after trailing silence',
+      (WidgetTester tester) async {
+    final speech = FakeSpeechInputService(stopForSilence: true);
+    final store = SettingsStore()..isLoaded = true;
+
+    await tester.pumpWidget(LMStudioApp(
+      store: store,
+      settingsReady: Future.value(),
+      chatRepository: ChatRepository.memory(),
+      speechInputService: speech,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const ValueKey('speech_input_button')));
+    await tester.pump();
+    expect(find.byTooltip('Stop listening'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+
+    expect(speech.stopCalls, 1);
+    expect(
+        tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+        'recognized speech');
   });
 
   testWidgets('disposing chat cancels injected speech input',

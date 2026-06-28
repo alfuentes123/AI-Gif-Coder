@@ -151,9 +151,7 @@ extension _ChatRequests on _ChatPageState {
     if (chat == null) return;
     final runtime = _runtimeFor(chat);
     final prompt = _inputController.text.trim();
-    if (prompt.isEmpty ||
-        runtime.isBusy ||
-        _speechState != SpeechInputState.idle) {
+    if (prompt.isEmpty || runtime.isBusy || _speechInputLocked) {
       return;
     }
     final incompatibility = _providerCompatibilityMessage(chat);

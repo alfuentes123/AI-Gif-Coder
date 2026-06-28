@@ -190,6 +190,9 @@ class _ChatPageState extends State<ChatPage> {
   late final SpeechInputService _speechInput;
   late final bool _ownsSpeechInput;
   Timer? _speechTimeout;
+  Timer? _speechSilenceTimer;
+  bool _speechOperationPending = false;
+  bool _checkingSpeechSilence = false;
 
   static const String _agentModeInstruction =
       'Agentic mode: Wrap code in [FILE: name.ext]...[/FILE]. No filler. Never use ``` markdown fences. Never add helper methods for testing, no test cases.';
@@ -205,6 +208,9 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   SpeechInputState get _speechState => _speechInput.state;
+
+  bool get _speechInputLocked =>
+      _speechOperationPending || _speechState != SpeechInputState.idle;
 
   void _onSpeechStateChanged() {
     if (mounted) setState(() {});
@@ -267,6 +273,7 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void dispose() {
     _speechTimeout?.cancel();
+    _speechSilenceTimer?.cancel();
     _speechInput.removeListener(_onSpeechStateChanged);
     if (_ownsSpeechInput) {
       unawaited(_speechInput.close());
@@ -282,16 +289,24 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _toggleSpeechInput() async {
-    if (_speechState == SpeechInputState.recording) {
-      await _stopSpeechInput();
-    } else if (_speechState == SpeechInputState.idle) {
-      await _startSpeechInput();
+    if (_speechOperationPending) return;
+    setState(() => _speechOperationPending = true);
+    try {
+      if (_speechState == SpeechInputState.recording) {
+        await _stopSpeechInput();
+      } else if (_speechState == SpeechInputState.idle) {
+        await _startSpeechInput();
+      }
+    } finally {
+      if (mounted) setState(() => _speechOperationPending = false);
     }
   }
 
   Future<void> _startSpeechInput() async {
     try {
       await _speechInput.startRecording();
+      if (_speechState != SpeechInputState.recording) return;
+      _startSpeechSilenceTimer();
       _speechTimeout?.cancel();
       _speechTimeout = Timer(const Duration(seconds: 60), () {
         if (_speechState == SpeechInputState.recording) {
@@ -308,6 +323,8 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _stopSpeechInput() async {
     _speechTimeout?.cancel();
     _speechTimeout = null;
+    _speechSilenceTimer?.cancel();
+    _speechSilenceTimer = null;
     try {
       final transcript = await _speechInput.stopAndTranscribe();
       if (!mounted || transcript.trim().isEmpty) return;
@@ -324,13 +341,53 @@ class _ChatPageState extends State<ChatPage> {
       }
     } catch (error) {
       _showSpeechError('Speech transcription failed: $error');
+    } finally {
+      if (mounted && _speechState == SpeechInputState.idle) {
+        setState(() => _speechOperationPending = false);
+      }
     }
   }
 
   Future<void> _cancelSpeechInput() async {
     _speechTimeout?.cancel();
     _speechTimeout = null;
+    _speechSilenceTimer?.cancel();
+    _speechSilenceTimer = null;
     await _speechInput.cancel();
+  }
+
+  void _startSpeechSilenceTimer() {
+    _speechSilenceTimer?.cancel();
+    _speechSilenceTimer = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => unawaited(_stopSpeechInputAfterSilence()),
+    );
+  }
+
+  Future<void> _stopSpeechInputAfterSilence() async {
+    if (_checkingSpeechSilence ||
+        _speechOperationPending ||
+        _speechState != SpeechInputState.recording) {
+      return;
+    }
+    _checkingSpeechSilence = true;
+    try {
+      final shouldStop = await _speechInput.shouldStopForSilence();
+      if (!mounted ||
+          !shouldStop ||
+          _speechOperationPending ||
+          _speechState != SpeechInputState.recording) {
+        return;
+      }
+      setState(() => _speechOperationPending = true);
+      try {
+        await _stopSpeechInput();
+      } finally {
+        if (mounted) setState(() => _speechOperationPending = false);
+      }
+    } finally {
+      _checkingSpeechSilence = false;
+    }
   }
 
   void _showSpeechError(String message) {
@@ -714,7 +771,7 @@ class _ChatPageState extends State<ChatPage> {
   static const double _topSettingsReserve = 35;
 
   /// Clears the message list, prompt bar, and a gap below the GIF frame.
-  static const double _bottomPromptReserve = 50;
+  static const double _bottomPromptReserve = 112;
 
   Widget _buildBackgroundGif(BuildContext context) {
     final filePath = _gifPath;
@@ -1095,37 +1152,46 @@ class _ChatPageState extends State<ChatPage> {
                           color: Colors.black.withValues(alpha: 0.55),
                           borderRadius: BorderRadius.circular(10),
                           child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
                               Expanded(
-                                child: TextField(
-                                  controller: _inputController,
-                                  enabled: _chatsLoaded &&
-                                      _state == AppState.waiting &&
-                                      incompatibility == null,
-                                  readOnly:
-                                      _speechState != SpeechInputState.idle,
-                                  style: const TextStyle(fontSize: 13),
-                                  onSubmitted:
-                                      _speechState == SpeechInputState.idle
-                                          ? (_) => _sendMessage()
-                                          : null,
-                                  decoration: InputDecoration(
-                                    hintText: switch (_speechState) {
-                                      SpeechInputState.recording =>
-                                        'Listening…',
-                                      SpeechInputState.transcribing =>
-                                        'Transcribing…',
-                                      SpeechInputState.idle =>
-                                        _state == AppState.waiting
-                                            ? 'Prompt…'
-                                            : _state.label,
-                                    },
-                                    hintStyle: const TextStyle(fontSize: 13),
-                                    border: InputBorder.none,
-                                    isDense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 10,
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxHeight: 112,
+                                  ),
+                                  child: TextField(
+                                    controller: _inputController,
+                                    enabled: _chatsLoaded &&
+                                        _state == AppState.waiting &&
+                                        incompatibility == null,
+                                    readOnly: _speechInputLocked,
+                                    keyboardType: TextInputType.multiline,
+                                    textInputAction: TextInputAction.newline,
+                                    minLines: 1,
+                                    maxLines: null,
+                                    style: const TextStyle(fontSize: 13),
+                                    onSubmitted: !_speechInputLocked
+                                        ? (_) => _sendMessage()
+                                        : null,
+                                    decoration: InputDecoration(
+                                      hintText: switch (_speechState) {
+                                        SpeechInputState.recording =>
+                                          'Listening…',
+                                        SpeechInputState.transcribing =>
+                                          'Transcribing…',
+                                        SpeechInputState.idle =>
+                                          _state == AppState.waiting
+                                              ? 'Prompt…'
+                                              : _state.label,
+                                      },
+                                      hintStyle: const TextStyle(fontSize: 13),
+                                      border: InputBorder.none,
+                                      isDense: true,
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                        vertical: 10,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -1145,7 +1211,10 @@ class _ChatPageState extends State<ChatPage> {
                                         ? Colors.redAccent
                                         : null,
                                 icon: _speechState ==
-                                        SpeechInputState.transcribing
+                                            SpeechInputState.transcribing ||
+                                        (_speechOperationPending &&
+                                            _speechState ==
+                                                SpeechInputState.idle)
                                     ? const SizedBox.square(
                                         dimension: 18,
                                         child: CircularProgressIndicator(
@@ -1163,7 +1232,8 @@ class _ChatPageState extends State<ChatPage> {
                                         incompatibility == null &&
                                         _chatsLoaded &&
                                         _speechState !=
-                                            SpeechInputState.transcribing
+                                            SpeechInputState.transcribing &&
+                                        !_speechOperationPending
                                     ? _toggleSpeechInput
                                     : null,
                               ),
@@ -1185,7 +1255,7 @@ class _ChatPageState extends State<ChatPage> {
                                   icon:
                                       const Icon(Icons.send_rounded, size: 20),
                                   onPressed: incompatibility == null &&
-                                          _speechState == SpeechInputState.idle
+                                          !_speechInputLocked
                                       ? _sendMessage
                                       : null,
                                 ),

@@ -52,6 +52,7 @@ String _transcribeSynchronously({
     );
     if (result != 0) {
       final message = error.toDartString().trim();
+      if (_isEmptyOrTransientAudioResult(message)) return '';
       throw WhisperException(
         message.isEmpty ? 'Transcription failed with code $result.' : message,
       );
@@ -63,4 +64,13 @@ String _transcribeSynchronously({
     calloc.free(output);
     calloc.free(error);
   }
+}
+
+bool _isEmptyOrTransientAudioResult(String message) {
+  return message == 'no_audio' ||
+      message == 'cancelled' ||
+      message == 'audio_open_failed' ||
+      message == 'invalid_wav' ||
+      message == 'malformed_wav' ||
+      message == 'unsupported_wav';
 }
